@@ -1,0 +1,19 @@
+services:
+  webui:
+    #image: "ghcr.io/yummiii/sd-webui-forge-docker:latest"
+    build: .
+    volumes:
+      - "./data:/app/sd-webui"
+    ports:
+      - "7860:7860"
+    environment:
+      - "ARGS=--listen --enable-insecure-extension-acces"
+      - "UI=forge"
+      - "VENV_DIR=/app/sd-webui/venv"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
