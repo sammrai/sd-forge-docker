@@ -2,13 +2,12 @@
 echo "Starting Stable Diffusion WebUI"
 
 # VENV_DIRの親ディレクトリを取得
-PARENT_DIR=$(dirname "${venv_dir}")
+PARENT_DIR=$(dirname "${WEBUI_DIR}")
 
 # 親ディレクトリの所有権を変更
+cp -r /app/webui ${WEBUI_DIR}
 chown -R webui:webui "${PARENT_DIR}"
 
-# webuiユーザーでリポジトリをクローン
-su webui -c "git clone https://github.com/lllyasviel/stable-diffusion-webui-forge.git ${PARENT_DIR}"
-
 # WebUIの起動
-exec su webui -c "/app/sd-webui/webui.sh $ARGS"
+export venv_dir="-"
+exec su webui -c "${WEBUI_DIR}/webui/webui.sh $ARGS"

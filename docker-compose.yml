@@ -2,13 +2,10 @@ services:
   webui:
     build: .
     volumes:
-      - "./data:/app/sd-webui"
+      - "./data:/app/data"
     environment:
-      ARGS: "--listen --enable-insecure-extension-acces --port 7680"
-      venv_dir: "/app/sd-webui/venv"
-      TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
-      TORCH_COMMAND: "pip install torch torchvision torchaudio"
-      COMMIT_HASH: f53307881bfd824dbdce6ac0d4bba04d9a74ab36
+      ARGS: "--listen --enable-insecure-extension-access --port 7680"
+      WEBUI_DIR: /app/data
     deploy:
       resources:
         reservations:
