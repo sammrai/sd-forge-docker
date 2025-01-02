@@ -1,15 +1,14 @@
 services:
   webui:
-    #image: "ghcr.io/yummiii/sd-webui-forge-docker:latest"
     build: .
     volumes:
       - "./data:/app/sd-webui"
-    ports:
-      - "7860:7860"
     environment:
-      - "ARGS=--listen --enable-insecure-extension-acces"
-      - "UI=forge"
-      - "VENV_DIR=/app/sd-webui/venv"
+      ARGS: "--listen --enable-insecure-extension-acces --port 7680"
+      venv_dir: "/app/sd-webui/venv"
+      TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
+      TORCH_COMMAND: "pip install torch torchvision torchaudio"
+      COMMIT_HASH: f53307881bfd824dbdce6ac0d4bba04d9a74ab36
     deploy:
       resources:
         reservations:
@@ -17,3 +16,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+  tunnel:
+    image: cloudflare/cloudflared
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+    environment:
+      - TUNNEL_TOKEN=$TUNNEL_TOKEN

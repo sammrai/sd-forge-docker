@@ -8,8 +8,6 @@ RUN apt install -y wget git python3 python3-venv libgl1 libglib2.0-0 apt-transpo
 COPY run.sh /app/run.sh
 RUN chmod +x /app/run.sh
 
-COPY webui-user.sh /webui-user.sh
-
 # webui ユーザーの作成と権限設定
 RUN useradd -m webui
 

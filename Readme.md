@@ -1,33 +1,35 @@
-A docker image for [Stable Diffusion WebUI Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge) or the AUTO1111 WebUI
+# Docker Compose ファイルの説明とトンネル設定方法
 
-> [!WARNING]
-> This Dockerfile is based on on Cuda 12.4, which requires Nvidia driver >=545.
-> In [Ubuntu 22.04](https://github.com/Yummiii/sd-webui-forge-docker/issues/1#issuecomment-2066840527) you can update it by running `ubuntu-drivers install nvidia:545` and a reboot. (Thanks [@casao](https://github.com/Casao))
 
-# Docker compose
-To run it, you will need the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+## `docker-compose.yml` の設定内容
 
-Create a directory. Inside this directory, create a subdirectory named `data` (if you don't and let docker create it, there might be permission issues) and a file named `docker-compose.yml`. Add the following content to the 'docker-compose.yml' file:
+### WebUIサービス
+- **イメージ**: コメントアウトされていますが、`ghcr.io/yummiii/sd-webui-forge-docker:latest` を使用できます。  
+  また、`build: .` としてローカルのDockerfileを使用してビルド可能です。
+- **ボリュームマウント**: ローカルの`data`ディレクトリをコンテナ内の`/app/sd-webui`にマウント。
+- **環境変数**:
+  - `ARGS`: WebUIに渡す引数。例: `--listen --enable-insecure-extension-access`
+  - `venv_dir`: 仮想環境のディレクトリ指定。
+  - `TORCH_INDEX_URL`: PyTorchのCUDA 12.1対応ホイールを取得するURL。
+  - `TORCH_COMMAND`: 必要なPyTorchライブラリをインストールするコマンド。
+  - `COMMIT_HASH`: 固定バージョンのコミットを指定。
+- **GPUリソース**: NVIDIA GPUを利用する設定を含む。
 
-```YML
-services:
-  webui:
-    image: "ghcr.io/yummiii/sd-webui-forge-docker:latest"
-    volumes:
-      - "./data:/app/sd-webui"
-    ports:
-      - "7860:7860"
-    environment:
-      - "ARGS=--listen --enable-insecure-extension-access" # Insecure extension access is required if you want to install extensions with the listen flag
-      - "UI=forge" # Specifies the UI that will be downloaded, forge for the forge webui or auto for the AUTOMATIC1111 webui
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-```
-then run it with `docker compose up`.
+### Tunnelサービス
+- **イメージ**: Cloudflareの公式Dockerイメージ `cloudflare/cloudflared` を使用。
+- **再起動ポリシー**: `unless-stopped`（停止しない限り自動再起動）。
+- **コマンド**:
+  - `tunnel`: Cloudflareトンネルを開始。
+  - `--no-autoupdate`: 自動更新を無効化。
+  - `run`: トンネルを実行。
+- **環境変数**:  
+  - `TUNNEL_TOKEN`: Cloudflareトンネルの認証に必要なトークン（シークレットとして設定）。
 
-You can set which arguments the webui will recive with the `ARGS` environment variable
+## 起動
+
+1. git clone https://github.com/sammrai/sd-forge-docker.git
+1. cd sd-forge-docker
+1. echo "TOKEN=xxxxxx" > .env
+1. sudo docker compose build
+1. sudo docker compose up -d
+1. sudo docker compose logs -f
