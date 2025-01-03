@@ -1,6 +1,7 @@
 services:
   webui:
-    build: .
+    image: sammrai/sd-forge-docker:latest
+    # build: .
     volumes:
       - "./data:/app/data"
     environment:
