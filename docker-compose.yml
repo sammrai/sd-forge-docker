@@ -4,7 +4,7 @@ services:
     volumes:
       - "./data:/app/data"
     environment:
-      ARGS: "--listen --enable-insecure-extension-access --port 7680"
+      ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --data-dir /app/data"
       WEBUI_DIR: /app/data
     deploy:
       resources:

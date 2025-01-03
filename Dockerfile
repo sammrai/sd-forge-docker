@@ -45,5 +45,9 @@ RUN chmod +x /app/run.sh
 RUN useradd -m webui && \
     chown webui:webui /app/webui -R
 
-# ENTRYPOINT の設定
-ENTRYPOINT ["/app/run.sh"]
+# 実行ユーザーの切り替え
+USER webui
+
+ENV venv_dir="-"
+# ENTRYPOINTをシェル形式に変更してARGSを渡す
+ENTRYPOINT ["/bin/bash", "-c", "/app/webui/webui.sh $ARGS"]

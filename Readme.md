@@ -33,3 +33,5 @@
 1. sudo docker compose build
 1. sudo docker compose up -d
 1. sudo docker compose logs -f
+
+https://github.com/AUTOMATIC1111/stable-diffusion-webui/issues/13507
