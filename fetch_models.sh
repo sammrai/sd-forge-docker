@@ -39,7 +39,7 @@ fi
 VAE_DIR="${BASE_DIR}/models/VAE"
 EMBEDDING_DIR="${BASE_DIR}/models/text_encoder"
 CHECKPOINT_DIR="${BASE_DIR}/models/Stable-diffusion"
-LORA_DIR="${BASE_DIR}/models/LoRA"
+LORA_DIR="${BASE_DIR}/models/Lora"
 LYCORIS_DIR="${BASE_DIR}/models/LyCORIS"
 
 # ダウンロード関数
@@ -50,7 +50,7 @@ download_model() {
 
     mkdir -p "$target_dir"
     echo "Downloading model ID: $id of type: $type to $target_dir"
-    civitdl "$id" "$target_dir" -k "$CIVITAI_API_TOKEN"
+    civitdl "$id" "$target_dir" -k "$CIVITAI_API_TOKEN" --nsfw-mode 2 --max-images 10 --with-prompt
     
     # ダウンロードの成功確認
     if [ "$?" -ne 0 ]; then
