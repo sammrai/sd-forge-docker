@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - "main"
-      - "test"
 
 jobs:
   docker-build:
@@ -25,7 +24,6 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
-        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v4
         with:
           context: .
@@ -33,14 +31,4 @@ jobs:
           tags: |
             ${{ github.repository }}:${{ github.sha }}
             ${{ github.repository }}:latest
-
-      - name: Build and push for test branch
-        if: github.ref == 'refs/heads/test'
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ github.repository }}:${{ github.sha }}
-            ${{ github.repository }}:test
 
