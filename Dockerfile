@@ -45,9 +45,12 @@ RUN pip install civitdl
 RUN useradd -m webui && \
     chown webui:webui /app/webui -R
 
+# ユーザディレクトリの位置を定義
+ENV USERDATA_DIR=/app/data
+RUN mkdir -p $USERDATA_DIR && chown webui:webui $USERDATA_DIR
+
 # 実行ユーザーの切り替え
 USER webui
-ENV USERDATA_DIR=/app/data
 ENV venv_dir="-"
 
 ENTRYPOINT ["/bin/bash", "-c", \
@@ -56,4 +59,4 @@ ENTRYPOINT ["/bin/bash", "-c", \
   civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \
   civitconfig alias --add @embed $USERDATA_DIR/models/text_encoder && \
   civitconfig alias --add @checkpoint $USERDATA_DIR/models/Stable-diffusion && \
-  /app/webui/webui.sh --gradio-allowed-path \".\"  --data-dir /app/data $ARGS" ]
+  /app/webui/webui.sh --gradio-allowed-path \".\"  --data-dir $USERDATA_DIR $ARGS" ]
