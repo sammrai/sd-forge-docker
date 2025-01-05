@@ -60,7 +60,7 @@ jobs:
           redoc-cli bundle openapi.json --output openapi.html
 
       - name: Upload Redoc HTML as an artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: openapi-redoc
           path: openapi.html
