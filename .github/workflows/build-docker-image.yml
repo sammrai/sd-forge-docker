@@ -31,4 +31,5 @@ jobs:
           tags: |
             ${{ github.repository }}:${{ github.sha }}
             ${{ github.repository }}:latest
-
+          cache-from: type=registry,ref=${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=${{ github.repository }}:buildcache,mode=max
