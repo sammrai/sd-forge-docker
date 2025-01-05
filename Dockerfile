@@ -37,13 +37,23 @@ RUN git clone https://github.com/lllyasviel/stable-diffusion-webui-forge.git web
 # Python の依存関係をインストール
 RUN pip install -r webui/requirements_versions.txt
 
-# run.sh スクリプトのコピーと実行権限の付与
-COPY run.sh /app/run.sh
-RUN chmod +x /app/run.sh
+# モデル管理ツールのインストール
+RUN pip install civitdl
+
 
 # webui ユーザーの作成と権限設定
 RUN useradd -m webui && \
     chown webui:webui /app/webui -R
 
-# ENTRYPOINT の設定
-ENTRYPOINT ["/app/run.sh"]
+# 実行ユーザーの切り替え
+USER webui
+ENV USERDATA_DIR=/app/data
+ENV venv_dir="-"
+
+ENTRYPOINT ["/bin/bash", "-c", \
+  "civitconfig default --api-key $CIVITAI_TOKEN || true; \
+  civitconfig alias --add @lora $USERDATA_DIR/models/Lora && \
+  civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \
+  civitconfig alias --add @embed $USERDATA_DIR/models/text_encoder && \
+  civitconfig alias --add @checkpoint $USERDATA_DIR/models/Stable-diffusion && \
+  /app/webui/webui.sh --gradio-allowed-path \".\"  --data-dir /app/data $ARGS" ]
