@@ -58,17 +58,10 @@ ENV venv_dir="-"
 ENV no_proxy="localhost, 127.0.0.1, ::1"
 
 ENTRYPOINT ["/bin/bash", "-c", "\
-  [ $(stat -c %u:%g $USERDATA_DIR) = '1000:1000' ] || { \
-    echo 'Error: The data directory ownership is incorrect.'; \
-    echo 'Expected ownership: UID:GID = 1000:1000'; \
-    echo \"Current ownership: $(stat -c %u:%g $USERDATA_DIR)\"; \
-    echo 'Please change the ownership of the data directory using:'; \
-    echo '    chown -R 1000:1000 $USERDATA_DIR'; \
-    exit 1; \
-  }; \
+  chown -R 1000:1000 $USERDATA_DIR && \
   civitconfig default --api-key $CIVITAI_TOKEN || true; \
   civitconfig alias --add @lora $USERDATA_DIR/models/Lora && \
   civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \
   civitconfig alias --add @embed $USERDATA_DIR/models/text_encoder && \
   civitconfig alias --add @checkpoint $USERDATA_DIR/models/Stable-diffusion && \
-  /app/webui/webui.sh --gradio-allowed-path \".\" --data-dir $USERDATA_DIR $ARGS" ]
+  su webui -c \"/app/webui/webui.sh --gradio-allowed-path . --data-dir $USERDATA_DIR $ARGS\""]
