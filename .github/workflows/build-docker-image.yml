@@ -4,15 +4,26 @@ on:
   push:
     branches:
       - "main"
+      - "test"
 
 jobs:
   docker-build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cuda_version: [12.1.0, 12.4.0]
     env:
       IMAGE_NAME: ${{ github.repository }}
     steps:
       - name: checkout
         uses: actions/checkout@v2
+
+      - name: Adjutment docker volumes
+        run: |
+          docker system df
+          docker system prune -a --volumes -f
+          docker system df
+          df
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v1
@@ -23,13 +34,52 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set short SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::6}" >> $GITHUB_ENV
+
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
+          build-args: CUDA_VERSION=${{ matrix.cuda_version }}
           tags: |
-            ${{ github.repository }}:${{ github.sha }}
-            ${{ github.repository }}:latest
-          cache-from: type=registry,ref=${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=${{ github.repository }}:buildcache,mode=max
+            ${{ github.repository }}:${{ matrix.cuda_version }}-${{ env.SHORT_SHA }}
+            ${{ github.repository }}:${{ matrix.cuda_version }}-latest
+          cache-from: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }}
+          cache-to: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }},mode=max
+
+  generate-redoc:
+    runs-on: ubuntu-latest
+    needs: docker-build # このジョブはdocker-buildが完了した後に実行されます
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+
+      - name: Run Docker container
+        run: |
+          docker run -d -p 7680:7680 --name sd-forge-container -e ARGS="--listen --enable-insecure-extension-access --port 7680 --nowebui --api --always-cpu --skip-torch-cuda-test --skip-install" sammrai/sd-forge-docker:latest
+          sleep 30 # Adjust if necessary, based on how long it takes the app to initialize
+
+      - name: Download openapi.json
+        run: |
+          curl -o openapi.json http://localhost:7680/openapi.json
+
+      - name: Install Redoc CLI
+        run: |
+          npm install -g redoc-cli
+
+      - name: Generate Redoc HTML
+        run: |
+          redoc-cli bundle openapi.json --output openapi.html
+
+      - name: Upload Redoc HTML as an artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: openapi-redoc
+          path: openapi.html
+
+      - name: Clean up Docker container
+        run: |
+          docker stop sd-forge-container
+          docker rm sd-forge-container

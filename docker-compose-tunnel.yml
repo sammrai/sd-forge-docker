@@ -8,8 +8,6 @@ services:
     environment:
       ARGS: "--listen --enable-insecure-extension-access --port 7680 --api"
       CIVITAI_TOKEN: $CIVITAI_TOKEN
-    ports:
-      - "7680:7680"
     deploy:
       resources:
         reservations:
@@ -17,3 +15,12 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+  tunnel:
+    image: cloudflare/cloudflared
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+    environment:
+      - TUNNEL_TOKEN=$TUNNEL_TOKEN
