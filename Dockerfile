@@ -59,6 +59,9 @@ ENV no_proxy="localhost, 127.0.0.1, ::1"
 
 ENTRYPOINT ["/bin/bash", "-c", "\
   chown -R 1000:1000 $USERDATA_DIR && \
+  id && \
+  echo $CUDA_VERSION && \
+  echo $COMMIT_ID && \
   civitconfig default --api-key $CIVITAI_TOKEN || true; \
   civitconfig alias --add @lora $USERDATA_DIR/models/Lora && \
   civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \
