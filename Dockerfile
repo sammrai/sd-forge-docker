@@ -1,5 +1,6 @@
 # ベースイメージの指定
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+ARG CUDA_VERSION=12.4.0
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
 
 # 環境変数の設定（非対話モードでのインストールを可能に）
 ENV DEBIAN_FRONTEND=noninteractive
@@ -24,7 +25,9 @@ RUN apt update && \
     # pip のアップグレード
     python3 -m pip install --upgrade pip && \
     # 必要な Python パッケージのインストール
-    python3 -m pip install torch torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu124
+    short_cuda_version="$(echo ${CUDA_VERSION} | cut -d. -f1-2 |tr -d .)" && \
+    python3 -m pip install torch torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu${short_cuda_version}
+
 
 # 作業ディレクトリの設定
 WORKDIR /app
@@ -52,6 +55,7 @@ RUN mkdir -p $USERDATA_DIR && chown webui:webui $USERDATA_DIR
 # 実行ユーザーの切り替え
 USER webui
 ENV venv_dir="-"
+ENV no_proxy="localhost, 127.0.0.1, ::1"
 
 ENTRYPOINT ["/bin/bash", "-c", \
   "civitconfig default --api-key $CIVITAI_TOKEN || true; \
