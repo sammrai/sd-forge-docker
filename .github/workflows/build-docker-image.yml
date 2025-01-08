@@ -35,8 +35,7 @@ jobs:
         with:
           context: .
           push: true
-          build-args: 
-            CUDA_VERSION: ${{ matrix.cuda_version }}
+          build-args: CUDA_VERSION=${{ matrix.cuda_version }}
           tags: |
             ${{ github.repository }}:${{ matrix.cuda_version }}-${{ env.SHORT_SHA }}
             ${{ github.repository }}:${{ matrix.cuda_version }}-latest
