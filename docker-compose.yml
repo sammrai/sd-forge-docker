@@ -6,7 +6,7 @@ services:
     volumes:
       - "./data:/app/data"
     environment:
-      ARGS: "--listen --enable-insecure-extension-access --port 7680 --api"
+      ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop"
       CIVITAI_TOKEN: $CIVITAI_TOKEN
     ports:
       - "7680:7680"
