@@ -53,15 +53,11 @@ ENV USERDATA_DIR=/app/data
 RUN mkdir -p $USERDATA_DIR && chown webui:webui $USERDATA_DIR
 
 # 実行ユーザーの切り替え
-USER webui
 ENV venv_dir="-"
 ENV no_proxy="localhost, 127.0.0.1, ::1"
 
 ENTRYPOINT ["/bin/bash", "-c", "\
   chown -R 1000:1000 $USERDATA_DIR && \
-  id && \
-  echo $CUDA_VERSION && \
-  echo $COMMIT_ID && \
   civitconfig default --api-key $CIVITAI_TOKEN || true; \
   civitconfig alias --add @lora $USERDATA_DIR/models/Lora && \
   civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \
