@@ -27,6 +27,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Set short SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::6}" >> $GITHUB_ENV
+
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
@@ -35,7 +38,7 @@ jobs:
           build-args: 
             CUDA_VERSION: ${{ matrix.cuda_version }}
           tags: |
-            ${{ github.repository }}:${{ matrix.cuda_version }}-${{ github.sha.slice(0, 6) }}
+            ${{ github.repository }}:${{ matrix.cuda_version }}-${{ env.SHORT_SHA }}
             ${{ github.repository }}:${{ matrix.cuda_version }}-latest
           cache-from: type=registry,ref=${{ github.repository }}:buildcache
           cache-to: type=registry,ref=${{ github.repository }}:buildcache,mode=max
