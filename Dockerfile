@@ -1,6 +1,5 @@
 # ベースイメージの指定
 ARG CUDA_VERSION=12.4.0
-ARG PYTORCH_VERSION=2.4
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
 
 # 環境変数の設定（非対話モードでのインストールを可能に）
@@ -8,8 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # ビルド引数の定義（デフォルトのコミットIDを設定）
 ARG COMMIT_ID=f53307881bfd824dbdce6ac0d4bba04d9a74ab36
+ARG PYTORCH_VERSION=2.4
 
-RUN echo $PYTORCH_VERSION
 
 # システムパッケージのインストールと Python パッケージのインストールを一つの RUN 命令に統合
 RUN apt update && \
@@ -29,8 +28,6 @@ RUN apt update && \
     python3 -m pip install --upgrade pip && \
     # 必要な Python パッケージのインストール
     short_cuda_version="$(echo ${CUDA_VERSION} | cut -d. -f1-2 |tr -d .)" && \
-    echo $PYTORCH_VERSION &&\
-    echo $CUDA_VERSION &&\
     python3 -m pip install torch==${PYTORCH_VERSION} torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu${short_cuda_version}
 
 
