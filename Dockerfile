@@ -27,7 +27,7 @@ RUN apt update && \
     python3 -m pip install --upgrade pip && \
     # 必要な Python パッケージのインストール
     short_cuda_version="$(echo ${CUDA_VERSION} | cut -d. -f1-2 |tr -d .)" && \
-    python3 -m pip install torch==${PYTORCH_VERSION} torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu${short_cuda_version}
+    python3 -m pip install "torch==${PYTORCH_VERSION}" torchvision torchaudio packaging --extra-index-url "https://download.pytorch.org/whl/cu${short_cuda_version}"
 
 
 # 作業ディレクトリの設定
