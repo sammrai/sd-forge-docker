@@ -1,6 +1,6 @@
 # Stable Diffusion WebUI Forge Docker Image
 
-This Docker image is pre-configured for **Stable Diffusion WebUI Forge** (not Auto1111 WebUI), offering a streamlined way to run the WebUI with all necessary components bundled. By using this Docker image, you gain access to the following features:
+This Docker image is pre-configured for [Stable Diffusion WebUI Forge](https://github.com/lllyasviel/stable-diffusion-webui-forge) ** (not Auto1111 WebUI), offering a streamlined way to run the WebUI with all necessary components bundled. By using this Docker image, you gain access to the following features:
 
 - **Pre-configured WebUI Forge setup**
 - **Optional CivitAI model downloader integration**
@@ -12,14 +12,24 @@ Simply clone the repository and start the service with `docker compose up -d`. N
 
 ## Supported CUDA Versions
 
-| CUDA Version | Docker Image Name                       |
-|--------------|-----------------------------------------|
-| 12.1.0       | `sammrai/sd-forge-docker:12.1.0-latest` |
-| 12.4.0       | `sammrai/sd-forge-docker:12.4.0-latest` |
+To ensure compatibility between your host machine's NVIDIA driver version and the appropriate Docker image, please refer to the following table:
 
-**Important:** Ensure your system meets the CUDA requirements for the specified version.
+| Docker Image                                 | Compatible Host NVIDIA Driver Version (Linux) | Forge Configuration                                      |
+|----------------------------------------------|-----------------------------------------------|----------------------------------------------------------|
+| `sammrai/sd-forge-docker:12.4.0`             | 550.54.14 or higher                           | CUDA 12.4 + Pytorch 2.4 (Fastest, but MSVC may be broken, xformers may not work)   |
+| `sammrai/sd-forge-docker:12.1.0`             | 530.30.02 or higher                           | CUDA 12.1 + Pytorch 2.3.1 (Recommended)                                              |
 
----
+**Important:** Ensure that your host machine's NVIDIA driver version falls within the specified range for the chosen Docker image.
+**Note:** The driver version references above are based on publicly available information and do not guarantee actual compatibility or official endorsement.
+
+You can check your current driver version by running:
+
+```bash
+nvidia-smi
+```
+
+This command will display the `Driver Version` installed on your system.
+For more detailed information on CUDA and driver compatibility, please refer to NVIDIA's official documentation. 
 
 ## Setup Instructions
 
@@ -60,6 +70,9 @@ By default, the `docker-compose.yml` file is configured for NVIDIA GPUs. Ensure 
 If GPU acceleration is not required, modify the `docker-compose.yml` file to disable GPU support and enable CPU-specific options. Update the `ARGS` environment variable as follows:
 
 ```diff
+   environment:
+-     ARGS: "--listen --enable-insecure-extension-access --port 7680 --api"
++     ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --always-cpu --skip-torch-cuda-test"
 -   deploy:
 -     resources:
 -       reservations:
@@ -67,9 +80,6 @@ If GPU acceleration is not required, modify the `docker-compose.yml` file to dis
 -           - driver: nvidia
 -             count: 1
 -             capabilities: [gpu]
-   environment:
--     ARGS: "--listen --enable-insecure-extension-access --port 7680 --api"
-+     ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --always-cpu --skip-torch-cuda-test"
 ```
 
 ### 3. Using Cloudflare Tunnel

@@ -7,6 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # ビルド引数の定義（デフォルトのコミットIDを設定）
 ARG COMMIT_ID=f53307881bfd824dbdce6ac0d4bba04d9a74ab36
+ARG PYTORCH_VERSION=2.4
+
 
 # システムパッケージのインストールと Python パッケージのインストールを一つの RUN 命令に統合
 RUN apt update && \
@@ -26,7 +28,7 @@ RUN apt update && \
     python3 -m pip install --upgrade pip && \
     # 必要な Python パッケージのインストール
     short_cuda_version="$(echo ${CUDA_VERSION} | cut -d. -f1-2 |tr -d .)" && \
-    python3 -m pip install torch torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu${short_cuda_version}
+    python3 -m pip install torch==${PYTORCH_VERSION} torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu${short_cuda_version}
 
 
 # 作業ディレクトリの設定

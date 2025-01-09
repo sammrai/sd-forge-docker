@@ -2,12 +2,12 @@ version: '3.9'
 
 services:
   webui:
-    image: sammrai/sd-forge-docker:12.4.0-latest
+    image: sammrai/sd-forge-docker:12.4.0
     volumes:
       - "./data:/app/data"
     environment:
       ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop"
-      CIVITAI_TOKEN: $CIVITAI_TOKEN
+      CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
     ports:
       - "7680:7680"
     deploy:
