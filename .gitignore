@@ -1,2 +1,6 @@
 .env
 stable-diffusion-webui-forge/
+/data/*
+
+# Exclude the .keep file from being ignored
+!/data/.keep

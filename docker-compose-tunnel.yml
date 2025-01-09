@@ -2,7 +2,7 @@ version: '3.9'
 
 services:
   webui:
-    image: sammrai/sd-forge-docker:12.4.0-latest
+    image: sammrai/sd-forge-docker:12.4.0
     volumes:
       - "./data:/app/data"
     environment:

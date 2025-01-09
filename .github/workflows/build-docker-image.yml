@@ -11,7 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        cuda_version: [12.1.0, 12.4.0]
+        include:
+          - cuda_version: 12.1.0
+            pytorch_version: 2.3.1
+          - cuda_version: 12.4.0
+            pytorch_version: 2.4
     env:
       IMAGE_NAME: ${{ github.repository }}
     steps:
@@ -42,10 +46,12 @@ jobs:
         with:
           context: .
           push: true
-          build-args: CUDA_VERSION=${{ matrix.cuda_version }}
+          build-args: |
+            CUDA_VERSION=${{ matrix.cuda_version }}
+            PYTORCH_VERSION=${{ matrix.pytorch_version }}
           tags: |
             ${{ github.repository }}:${{ matrix.cuda_version }}-${{ env.SHORT_SHA }}
-            ${{ github.repository }}:${{ matrix.cuda_version }}-latest
+            ${{ github.repository }}:${{ matrix.cuda_version }}
           cache-from: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }}
           cache-to: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }},mode=max
 
