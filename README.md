@@ -104,37 +104,26 @@ For secure external access to the WebUI, configure a **Cloudflare Tunnel**. Foll
 
 ## CivitAI Integration (Optional)
 
-The **CivitAI** model downloader automates the downloading and placement of models. To enable this feature:
+The **CivitAI** model downloader automates the downloading and placement of models. While optional, it is **highly recommended** to add your **CIVITAI\_TOKEN** in the `.env` file, as many models require authentication to download.
 
 ### 1. Add Your CIVITAI Token
 
-Include your **CIVITAI_TOKEN** in the `.env` file. While optional, it is **highly recommended**, as many models require a token to download:
+Include your **CIVITAI\_TOKEN** in the `.env` file to enable seamless integration:
 
 ```env
 CIVITAI_TOKEN=yourtoken...
 ```
 
-### 2. Supported Model Types
+### 2. Supported Model Types and Example Commands
 
-The following model types are supported for automatic downloads:
+The following model types are supported for automatic downloads, along with their corresponding aliases to ensure models are placed in the correct directories:
 
-- **Lora**
-- **VAE**
-- **Embed**
-- **Checkpoint**
+- **Lora**: `@lora`
+- **VAE**: `@vae`
+- **Embed**: `@embed`
+- **Checkpoint**: `@checkpoint`
 
-### 3. Use Aliases for Model Placement
-
-Use these aliases to ensure models are placed in the correct directories:
-
-- `@lora` for Lora models
-- `@vae` for VAE models
-- `@embed` for Embed models
-- `@checkpoint` for Checkpoint models
-
-### 4. Download Models
-
-Use the following commands to download and place models:
+Here are some example commands to download and place models:
 
 ```bash
 docker compose exec webui civitdl 257749 439889 @checkpoint
@@ -142,3 +131,5 @@ docker compose exec webui civitdl 332646 @embed
 docker compose exec webui civitdl 660673 @vae
 docker compose exec webui civitdl 341353 @lora
 ```
+
+
