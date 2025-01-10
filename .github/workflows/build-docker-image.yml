@@ -5,6 +5,7 @@ on:
     branches:
       - "main"
       - "test"
+      - "gh-pages"
 
 jobs:
   docker-build:
