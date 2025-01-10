@@ -5,6 +5,7 @@ on:
     branches:
       - "main"
       - "test"
+      - "gh-pages"
 
 jobs:
   docker-build:
@@ -56,36 +57,68 @@ jobs:
           cache-to: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }},mode=max
 
   generate-redoc:
+    needs: docker-build
     runs-on: ubuntu-latest
-    needs: docker-build # このジョブはdocker-buildが完了した後に実行されます
     steps:
       - name: checkout
         uses: actions/checkout@v2
 
       - name: Run Docker container
         run: |
-          docker run -d -p 7680:7680 --name sd-forge-container -e ARGS="--listen --enable-insecure-extension-access --port 7680 --nowebui --api --always-cpu --skip-torch-cuda-test --skip-install" sammrai/sd-forge-docker:latest
+          docker run -d -p 7680:7680 --name sd-forge-container -e ARGS="--listen --enable-insecure-extension-access --port 7680 --nowebui --api --api-server-stop --always-cpu --skip-torch-cuda-test --skip-install" sammrai/sd-forge-docker:12.4.0
           sleep 30 # Adjust if necessary, based on how long it takes the app to initialize
 
       - name: Download openapi.json
         run: |
-          curl -o openapi.json http://localhost:7680/openapi.json
+          for i in $(seq 1 30); do
+            curl -sf -o openapi.json http://localhost:7680/openapi.json && break
+            sleep 1
+          done
+          [ -f openapi.json ] || { echo "openapi.json not found after 30 attempts"; exit 1; }
 
-      - name: Install Redoc CLI
+      - name: Install openapi-generate-html
         run: |
-          npm install -g redoc-cli
+          npm install -g openapi-generate-html
+          mkdir pages
 
-      - name: Generate Redoc HTML
+      - name: Generate Stoplight Light HTML
         run: |
-          redoc-cli bundle openapi.json --output openapi.html
+          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=light --output pages/stoplight.html
 
-      - name: Upload Redoc HTML as an artifact
+      - name: Generate Stoplight Dark HTML
+        run: |
+          npx openapi-generate-html -i openapi.json --ui=redoc --theme=light --output pages/redoc.html
+
+      - name: Generate Swagger Light HTML
+        run: |
+          npx openapi-generate-html -i openapi.json --ui=swagger --theme=light --output pages/swagger.html
+
+      - name: Upload Redoc and Swagger HTML as artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: openapi-redoc
-          path: openapi.html
+          name: openapi-docs
+          path: pages
+
+      - uses: actions/upload-pages-artifact@v1
+        with:
+          path: pages
 
       - name: Clean up Docker container
         run: |
           docker stop sd-forge-container
           docker rm sd-forge-container
+
+  documentation-deployment:
+    needs: generate-redoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ github.ref == 'refs/heads/main' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/deploy-pages@v1
+        id: deployment
