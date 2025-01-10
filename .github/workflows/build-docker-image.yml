@@ -71,24 +71,27 @@ jobs:
         run: |
           curl -o openapi.json http://localhost:7680/openapi.json
 
-      - name: Install Redoc CLI
+      - name: Install openapi-generate-html
         run: |
-          npm install -g @redocly/cli
+          npm install -g openapi-generate-html
 
-      - name: Generate Redoc HTML
+      - name: Generate Stoplight Light HTML
         run: |
-          npx @redocly/cli build-docs openapi.json --output redoc.html
-          mkdir pages
-          mv redoc.html pages/
+          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=light
+          mkdir -p pages/stoplight-light
+          mv openapi.html pages/stoplight-light/index.html
 
-      - name: Install Swagger CLI
+      - name: Generate Stoplight Dark HTML
         run: |
-          npm install -g swagger-cli
+          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=dark
+          mkdir -p pages/stoplight-dark
+          mv openapi.html pages/stoplight-dark/index.html
 
-      - name: Generate Swagger HTML
+      - name: Generate Swagger Light HTML
         run: |
-          swagger-cli bundle openapi.json --outfile swagger.html --type html
-          mv swagger.html pages/
+          npx openapi-generate-html -i openapi.json --ui=swagger --theme=light
+          mkdir -p pages/swagger-light
+          mv openapi.html pages/swagger-light/index.html
 
       - name: Upload Redoc and Swagger HTML as artifacts
         uses: actions/upload-artifact@v3
