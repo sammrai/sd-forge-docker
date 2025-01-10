@@ -89,3 +89,20 @@ jobs:
         run: |
           docker stop sd-forge-container
           docker rm sd-forge-container
+      - uses: actions/upload-pages-artifact@v1
+        with:
+          path: pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest 
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/deploy-pages@v1
+        id: deployment
