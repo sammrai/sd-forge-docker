@@ -94,7 +94,7 @@ jobs:
           path: pages
 
   deploy:
-    needs: build
+    needs: generate-redoc
     runs-on: ubuntu-latest 
     timeout-minutes: 5
     environment:
