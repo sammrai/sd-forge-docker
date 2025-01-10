@@ -69,29 +69,24 @@ jobs:
 
       - name: Download openapi.json
         run: |
-          curl -o openapi.json http://localhost:7680/openapi.json
+          curl -output openapi.json http://localhost:7680/openapi.json
 
       - name: Install openapi-generate-html
         run: |
           npm install -g openapi-generate-html
+          mkdir pages
 
       - name: Generate Stoplight Light HTML
         run: |
-          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=light
-          mkdir -p pages/stoplight-light
-          mv openapi.html pages/stoplight-light/index.html
+          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=light --output pages/stoplight/stoplight.html
 
       - name: Generate Stoplight Dark HTML
         run: |
-          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=dark
-          mkdir -p pages/stoplight-dark
-          mv openapi.html pages/stoplight-dark/index.html
+          npx openapi-generate-html -i openapi.json --ui=redoc --theme=light --output pages/redoc.html
 
       - name: Generate Swagger Light HTML
         run: |
-          npx openapi-generate-html -i openapi.json --ui=swagger --theme=light
-          mkdir -p pages/swagger-light
-          mv openapi.html pages/swagger-light/index.html
+          npx openapi-generate-html -i openapi.json --ui=swagger --theme=light --output pages/swagger.html
 
       - name: Upload Redoc and Swagger HTML as artifacts
         uses: actions/upload-artifact@v3
@@ -108,7 +103,7 @@ jobs:
           docker stop sd-forge-container
           docker rm sd-forge-container
 
-  deploy:
+  documentation-deployment:
     needs: generate-redoc
     runs-on: ubuntu-latest 
     timeout-minutes: 5
