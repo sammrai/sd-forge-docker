@@ -69,7 +69,7 @@ jobs:
 
       - name: Download openapi.json
         run: |
-          curl -output openapi.json http://localhost:7680/openapi.json
+          curl -o openapi.json http://localhost:7680/openapi.json
 
       - name: Install openapi-generate-html
         run: |
