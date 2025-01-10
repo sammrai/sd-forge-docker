@@ -73,17 +73,27 @@ jobs:
 
       - name: Install Redoc CLI
         run: |
-          npm install -g redoc-cli
+          npm install -g @redocly/cli
 
       - name: Generate Redoc HTML
         run: |
-          redoc-cli bundle openapi.json --output openapi.html
-          mv openapi.html pages/
+          npx @redocly/cli build-docs openapi.json --output redoc.html
+          mkdir pages
+          mv redoc.html pages/
 
-      - name: Upload Redoc HTML as an artifact
+      - name: Install Swagger CLI
+        run: |
+          npm install -g swagger-cli
+
+      - name: Generate Swagger HTML
+        run: |
+          swagger-cli bundle openapi.json --outfile swagger.html --type html
+          mv swagger.html pages/
+
+      - name: Upload Redoc and Swagger HTML as artifacts
         uses: actions/upload-artifact@v3
         with:
-          name: openapi-redoc
+          name: openapi-docs
           path: pages
 
       - uses: actions/upload-pages-artifact@v1
