@@ -78,20 +78,22 @@ jobs:
       - name: Generate Redoc HTML
         run: |
           redoc-cli bundle openapi.json --output openapi.html
+          mv openapi.html pages/
 
       - name: Upload Redoc HTML as an artifact
         uses: actions/upload-artifact@v3
         with:
           name: openapi-redoc
-          path: openapi.html
+          path: pages
+
+      - uses: actions/upload-pages-artifact@v1
+        with:
+          path: pages
 
       - name: Clean up Docker container
         run: |
           docker stop sd-forge-container
           docker rm sd-forge-container
-      - uses: actions/upload-pages-artifact@v1
-        with:
-          path: pages
 
   deploy:
     needs: generate-redoc
