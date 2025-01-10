@@ -78,7 +78,7 @@ jobs:
 
       - name: Generate Stoplight Light HTML
         run: |
-          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=light --output pages/stoplight/stoplight.html
+          npx openapi-generate-html -i openapi.json --ui=stoplight --theme=light --output pages/stoplight.html
 
       - name: Generate Stoplight Dark HTML
         run: |
