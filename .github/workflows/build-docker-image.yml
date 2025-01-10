@@ -70,7 +70,11 @@ jobs:
 
       - name: Download openapi.json
         run: |
-          curl -o openapi.json http://localhost:7680/openapi.json
+          for i in $(seq 1 30); do
+            curl -sf -o openapi.json http://localhost:7680/openapi.json && break
+            sleep 1
+          done
+          [ -f openapi.json ] || { echo "openapi.json not found after 30 attempts"; exit 1; }
 
       - name: Install openapi-generate-html
         run: |
@@ -106,8 +110,9 @@ jobs:
 
   documentation-deployment:
     needs: generate-redoc
-    runs-on: ubuntu-latest 
+    runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: ${{ github.ref == 'refs/heads/main' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
