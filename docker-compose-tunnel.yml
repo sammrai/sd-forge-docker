@@ -33,7 +33,7 @@ services:
   civitdl:
     image: sammrai/civitdl-webapi:latest
     volumes:
-      - "./data/models:/data"
+      - "./data:/data"
     environment:
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
     labels:
