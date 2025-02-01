@@ -2,6 +2,15 @@ version: '3.9'
 
 services:
   webui:
+    image: traefik:v2.10
+    command:
+      - "--providers.docker"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:7680"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  sdui:
     image: sammrai/sd-forge-docker:12.4.0
     volumes:
       - "./data:/app/data"
@@ -15,6 +24,26 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sdui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.sdui.priority=1"
+      - "traefik.http.services.sdui.loadbalancer.server.port=7680"
+
+  civitdl:
+    image: sammrai/civitdl-webapi:latest
+    volumes:
+      - "./data/models:/data"
+    environment:
+      CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.civitdl.rule=PathPrefix(`/civitdl`)"
+      - "traefik.http.routers.civitdl.priority=10"
+      - "traefik.http.middlewares.civitdl-stripprefix.stripprefix.prefixes=/civitdl"
+      - "traefik.http.routers.civitdl.middlewares=civitdl-stripprefix"
+      - "traefik.http.services.civitdl.loadbalancer.server.port=7681"
+
   tunnel:
     image: cloudflare/cloudflared
     restart: unless-stopped
