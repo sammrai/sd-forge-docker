@@ -93,7 +93,7 @@ jobs:
         run: |
           npx openapi-generate-html -i openapi.json --ui=swagger --theme=light --output pages/swagger.html
 
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: pages
 
