@@ -45,6 +45,9 @@ RUN pip install -r webui/requirements_versions.txt
 # モデル管理ツールのインストール
 RUN pip install civitdl
 
+# VAE Baking Toolのコピー
+COPY vae_bake.py /app/vae_bake.py
+RUN chmod +x /app/vae_bake.py
 
 # webui ユーザーの作成と権限設定
 RUN useradd -m webui && \

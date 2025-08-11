@@ -129,3 +129,20 @@ The **CivitAI** model downloader automates the downloading and placement of mode
    docker compose exec webui civitdl 341353 @lora
    ```
 
+## VAE Baking Tool
+
+Embed a VAE directly into a checkpoint model. The original model is automatically backed up to the `bak/` directory:
+
+```bash
+docker compose exec sdui python3 /app/vae_bake.py 'MODEL_FOLDER_NAME' 'VAE_FILENAME'
+```
+
+Example:
+```bash
+docker compose exec sdui python3 /app/vae_bake.py 'AbsoluteReality-mid_81458-vid_132760' 'sdxl_vae.safetensors'
+```
+
+**Process:**
+* Replaces original model with VAE-baked version
+* Backs up original model to `bak/MODEL_FOLDER_NAME`
+
