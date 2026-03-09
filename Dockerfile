@@ -49,6 +49,9 @@ RUN pip install civitdl
 COPY vae_bake.py /app/vae_bake.py
 RUN chmod +x /app/vae_bake.py
 
+# ControlNet fix for txt2img + Tile (HiRes Fix support)
+COPY controlnet.py /app/webui/extensions-builtin/sd_forge_controlnet/scripts/controlnet.py
+
 # webui ユーザーの作成と権限設定
 RUN useradd -m webui && \
     chown webui:webui /app/webui -R
