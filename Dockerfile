@@ -23,10 +23,14 @@ RUN apt update && \
         apt-transport-https \
         libgoogle-perftools-dev \
         bc \
-        python3-pip && \
-    # pip のアップグレード
-    python3 -m pip install --upgrade pip && \
-    # 必要な Python パッケージのインストール
+        python3-pip
+
+# setuptools 70+ で pkg_resources が分離され、CLIP など旧来 setup.py が壊れるため
+# build-isolation も含め全 pip install で setuptools<70 にピン
+RUN echo 'setuptools<70' > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
+
+RUN python3 -m pip install --upgrade pip && \
     short_cuda_version="$(echo ${CUDA_VERSION} | cut -d. -f1-2 |tr -d .)" && \
     python3 -m pip install torch==${PYTORCH_VERSION} torchvision torchaudio packaging --extra-index-url https://download.pytorch.org/whl/cu${short_cuda_version}
 
@@ -41,6 +45,9 @@ RUN git clone https://github.com/lllyasviel/stable-diffusion-webui-forge.git web
 
 # Python の依存関係をインストール
 RUN pip install -r webui/requirements_versions.txt
+
+# Forge 起動時に毎回 pip install されないよう CLIP をシステム側へプリインストール
+RUN pip install https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
 
 # モデル管理ツールのインストール
 RUN pip install civitdl
