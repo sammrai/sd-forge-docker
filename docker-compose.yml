@@ -2,11 +2,30 @@ version: '3.9'
 
 services:
   webui:
-    image: sammrai/sd-forge-docker:12.1.0
+    image: traefik:v2.10
+    command:
+      - "--providers.docker"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:7680"
     volumes:
-      - "./data:/app/data"
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - 7680:7680
+    restart: always
+
+  sdui:
+    build:
+      context: .
+      args:
+        PYTORCH_VERSION: "2.5.1"
+    image: sammrai/sd-forge-docker:12.4.0
+    volumes:
+      - "/data/forge-data:/app/data"
     environment:
-      ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop --always-cpu --skip-torch-cuda-test --skip-install"
+      # forge25 = lllyasviel forge(torch 2.5)+ diffusers Z-Image 透過統合。
+      # --fp32-vae / FORGE_HR_DENOISE_MULT / FORGE_DISABLE_TF32 は Neo 専用補正で
+      # lllyasviel forge には不要(元 forge の素のフラグで精度一致)。
+      ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop"
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
     deploy:
       resources:
@@ -15,5 +34,36 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    ports:
-      - "7680:7680"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sdui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.sdui.priority=1"
+      - "traefik.http.services.sdui.loadbalancer.server.port=7680"
+    restart: always
+
+  civitdl:
+    image: sammrai/civitdl-webapi:latest
+    volumes:
+      - "/data/forge-data:/data"
+    environment:
+      CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.civitdl.rule=PathPrefix(`/civitdl`)"
+      - "traefik.http.routers.civitdl.priority=10"
+      - "traefik.http.middlewares.civitdl-stripprefix.stripprefix.prefixes=/civitdl"
+      - "traefik.http.routers.civitdl.middlewares=civitdl-stripprefix"
+      - "traefik.http.services.civitdl.loadbalancer.server.port=7681"
+    restart: always
+
+  # tunnel:
+  #   image: cloudflare/cloudflared
+  #   restart: unless-stopped
+  #   command:
+  #     - tunnel
+  #     - --no-autoupdate
+  #     - run
+  #   environment:
+  #     - TUNNEL_TOKEN=$TUNNEL_TOKEN
+
+

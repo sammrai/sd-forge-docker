@@ -15,7 +15,7 @@ Ensure that the NVIDIA driver version on your **host machine** is compatible wit
 
 | Docker Image                                 | Required NVIDIA Driver Version (Host Machine)  | Forge Configuration                                      |
 |----------------------------------------------|------------------------------------------------|----------------------------------------------------------|
-| `sammrai/sd-forge-docker:12.4.0`             | 550.54.14 or higher                            | CUDA 12.4 + Pytorch 2.4 (Fastest, but MSVC issues possible, xformers may not work)   |
+| `sammrai/sd-forge-docker:12.4.0`             | 550.54.14 or higher                            | CUDA 12.4 + Pytorch 2.5.1 (Fastest; bundles diffusers Z-Image-Turbo transparent integration) |
 | `sammrai/sd-forge-docker:12.1.0`             | 530.30.02 or higher                            | CUDA 12.1 + Pytorch 2.3.1 (Recommended)                                              |
 
 **Key Notes:**
