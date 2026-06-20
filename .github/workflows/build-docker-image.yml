@@ -13,10 +13,11 @@ jobs:
     strategy:
       matrix:
         include:
-          # forge25 統合: Z-Image(diffusers) 同居のため torch 2.5.1 + cu124 固定。
-          # Dockerfile が torchaudio==2.5.1+cu124 を決め打ち force-reinstall するため
-          # 当面 12.4.0(cu124) の1系統のみ。cu121 系は torchaudio をパラメータ化して
-          # Z-Image を cu121/torch2.3.1 で実検証できたら 12.1.0 行を戻す。
+          # forge25 統合(Z-Image diffusers 同居)。Dockerfile は torchaudio を
+          # CUDA_VERSION/PYTORCH_VERSION から導出するため、両 CUDA 系統でタグと
+          # 中身の CUDA が一致する(12.1.0=cu121/torch2.3.1, 12.4.0=cu124/torch2.5.1)。
+          - cuda_version: 12.1.0
+            pytorch_version: 2.3.1
           - cuda_version: 12.4.0
             pytorch_version: 2.5.1
     env:

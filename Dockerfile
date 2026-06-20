@@ -75,9 +75,17 @@ RUN pip install civitdl
 # Z-Image を diffusers で実装するための依存（comfy-kitchen不要・forge精度を保ったまま併設）。
 # diffusers は z_image パイプラインを含む新しめのもの、transformers は Qwen3 用に >=4.51。
 # 元のtorch行がtorchaudioをピン無しで入れ2.11.0(CUDA13要求)になり、diffusers z_image import時に
-# libcudart.so.13エラーになるため、torchに一致する torchaudio==2.5.1+cu124 に入れ直す。
-RUN pip install --force-reinstall --no-deps torchaudio==2.5.1+cu124 --index-url https://download.pytorch.org/whl/cu124
+# libcudart.so.13エラーになるため、入っている torch+CUDA に一致する torchaudio に入れ直す。
+# 版とindexは CUDA_VERSION / PYTORCH_VERSION から導出し、matrix の全CUDA系統で不一致を防ぐ
+# (12.4.0/2.5.1 -> torchaudio 2.5.1+cu124 / 12.1.0/2.3.1 -> 2.3.1+cu121)。
+RUN short_cuda_version="$(echo ${CUDA_VERSION} | cut -d. -f1-2 | tr -d .)" && \
+    pip install --force-reinstall --no-deps "torchaudio==${PYTORCH_VERSION}+cu${short_cuda_version}" \
+        --index-url "https://download.pytorch.org/whl/cu${short_cuda_version}"
 RUN pip install "diffusers>=0.36.0" "transformers>=4.51.0" "peft>=0.17.0" "accelerate>=1.2.0" "kornia>=0.7.3" sentencepiece protobuf
+
+# ADetailer は ultralytics(YOLO)を要求するが、起動時の拡張 install が PIP_CONSTRAINT 等で
+# 入らず ModuleNotFoundError になる。イメージに明示プリインストールして確実に使えるようにする。
+RUN pip install ultralytics
 
 # huggingface_hub 1.0 で削除された HfFolder を復元するシム（forgeの旧gradio用）。
 # sitecustomize として配置し python 起動時に自動適用 → 新hf_hub と旧gradio を両立。

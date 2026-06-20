@@ -27,6 +27,8 @@ services:
       # lllyasviel forge には不要(元 forge の素のフラグで精度一致)。
       ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop"
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
+      # Z-Image HiRes の大解像度確保で起きる断片化由来の CUDA OOM を緩和(無損失)。
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
     deploy:
       resources:
         reservations:
