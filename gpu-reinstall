@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -e  # エラーで即終了
+set -u  # 未定義変数でエラー
+set -o pipefail  # パイプ中のエラーを検出
+
+# -f オプションで完全再インストールモード
+if [[ "${1:-}" == "-f" ]]; then
+    echo "=== NVIDIA ドライバ完全削除 ==="
+    sudo apt purge -y '^nvidia-.*' || true
+    sudo apt autoremove --purge -y || true
+    sudo apt clean
+
+    echo "=== ubuntu-drivers をインストール ==="
+    sudo apt update
+    sudo apt install -y ubuntu-drivers-common
+fi
+
+echo "=== 使用可能な GPU ドライバ一覧を表示 ==="
+sudo ubuntu-drivers --gpgpu list
+
+echo "=== 適切な GPU ドライバをインストール ==="
+sudo ubuntu-drivers --gpgpu install
+
+echo "=== システムを再起動します ==="
+echo "手動で以下を実行してください："
+echo "  sudo reboot"
+exit 0
+
+### --- 再起動後に以下を手動で実行 ---
+# 確認:
+#   nvidia-smi
+
+# Forge用Docker設定:
+#   cd ~/sd-forge-docker
+#   sudo apt install -y nvidia-container-toolkit
+#   sudo nvidia-ctk runtime configure --runtime=docker
+#   sudo systemctl restart docker
+
+# 動作確認:
+#   docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu20.04 nvidia-smi
+
