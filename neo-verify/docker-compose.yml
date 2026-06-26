@@ -1,0 +1,35 @@
+# Forge Neo を「1回だけ起動して Z-Image-Turbo が動くか検証」するための隔離環境。
+# 既存の docker-compose.yml / sdui イメージには一切触れない。
+# モデルは既存の forge-data を read-only で共有参照する。
+services:
+  neo:
+    build: .
+    image: sd-forge-neo:verify
+    ports:
+      - "7690:7690"
+    command:
+      - "--listen"
+      - "--port=7690"
+      - "--api"
+      - "--api-server-stop"
+      - "--model-ref=/models"
+      - "--data-dir=/data"
+      - "--gradio-allowed-path=/data"
+    volumes:
+      # 既存モデル群（Z Image Base / Turbo LoRA / 後述で追加する Turbo 本体）を read-only 共有
+      - "/data/forge-data/models:/models:ro"
+      # venv（torch 等の初回導入結果）を永続化 → 2回目以降の起動が速い
+      - "neo-venv:/app/neo/venv"
+      # config / 出力画像など。検証用なので named volume に隔離
+      - "neo-data:/data"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  neo-venv:
+  neo-data:

@@ -1,0 +1,11 @@
+nvidia-smi
+
+
+docker compose down
+docker compose up -d
+
+# ADetailer は Neo 用フォーク(ADetailer-Neo)。依存(ultralytics/mediapipe)は
+# イメージにシステム焼き込み済みのため pip install . は不要。
+
+docker compose logs -f
+
