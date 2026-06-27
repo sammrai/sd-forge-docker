@@ -49,6 +49,13 @@ RUN pip install -r webui/requirements_versions.txt
 # Forge 起動時に毎回 pip install されないよう CLIP をシステム側へプリインストール
 RUN pip install https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
 
+# ADetailer 拡張(data ボリューム常駐)の依存をシステム側へプリインストール。
+# forge は webui(非root)で起動するため拡張の自動 install は --user(~/.local)に入り
+# ランタイムから import できない。ここで root=system に入れておけば forge が確実に import 可能。
+# mediapipe は <=0.10.15 にピン(0.10.16+ は numpy>=2 を要求し forge/blendmodes(numpy<2)と競合)。
+RUN pip install "ultralytics>=8.3.0,!=8.3.41,!=8.3.42,!=8.3.45,!=8.3.46" \
+    "mediapipe>=0.10.13,<=0.10.15" "rich>=13.0.0"
+
 # モデル管理ツールのインストール
 RUN pip install civitdl
 

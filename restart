@@ -1,0 +1,15 @@
+nvidia-smi
+
+
+docker compose down
+docker compose up -d
+
+# ADetailer 依存(ultralytics/mediapipe/rich)をシステム側(root)へ。
+# forge は webui(非root)で起動するため拡張の自動 install は --user に入り import できない。
+# 12.4.0-be5e8d 以降はイメージに焼き込み済みなので下記は no-op(冪等)。古いイメージ用の安全網。
+# ※ `pip install .` は pyproject の緩いピンで mediapipe 0.10.35→numpy2 を引き込み forge と競合するため使わない。
+docker compose exec -u 0 sdui pip install \
+  "ultralytics>=8.3.0,!=8.3.41,!=8.3.42,!=8.3.45,!=8.3.46" \
+  "mediapipe>=0.10.13,<=0.10.15" "rich>=13.0.0"
+
+docker compose logs -f
