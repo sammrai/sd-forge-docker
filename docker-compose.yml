@@ -18,7 +18,7 @@ services:
     # z-image 統合(旧 12.4.0)は GPU 残留由来の OOM 連鎖が未解決のため zimage-wip へ退避し本番から撤去。
     image: sammrai/sd-forge-docker:12.4.0-c6f25d
     volumes:
-      - "/data/forge-data:/app/data"
+      - "/data2/forge-data:/app/data"
     environment:
       ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop"
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
@@ -39,7 +39,7 @@ services:
   civitdl:
     image: sammrai/civitdl-webapi:latest
     volumes:
-      - "/data/forge-data:/data"
+      - "/data2/forge-data:/data"
     environment:
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
     labels:
