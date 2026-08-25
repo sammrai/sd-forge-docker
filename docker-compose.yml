@@ -1,4 +1,11 @@
-version: '3.9'
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
 
 services:
   webui:
@@ -14,21 +21,15 @@ services:
     restart: always
 
   sdui:
-    # 安定版(be5e8dc + ADetailer 依存焼き込み, c6f25d, CUDA12.4 ビルド)。
-    # z-image 統合(旧 12.4.0)は GPU 残留由来の OOM 連鎖が未解決のため zimage-wip へ退避し本番から撤去。
-    image: sammrai/sd-forge-docker:12.4.0-c6f25d
+    # タグは CUDA バージョン。CI が main へのコミット毎に上書きする。
+    image: sammrai/sd-forge-docker:12.4.0
+    <<: *gpu
     volumes:
       - "/data2/forge-data:/app/data"
     environment:
       ARGS: "--listen --enable-insecure-extension-access --port 7680 --api --api-server-stop"
+      COMFY_URL: "http://comfy:8188"
       CIVITAI_TOKEN: ${CIVITAI_TOKEN:-''}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.sdui.rule=PathPrefix(`/`)"
@@ -51,14 +52,12 @@ services:
       - "traefik.http.services.civitdl.loadbalancer.server.port=7681"
     restart: always
 
-  # tunnel:
-  #   image: cloudflare/cloudflared
-  #   restart: unless-stopped
-  #   command:
-  #     - tunnel
-  #     - --no-autoupdate
-  #     - run
-  #   environment:
-  #     - TUNNEL_TOKEN=$TUNNEL_TOKEN
-
-
+  comfy:
+    build:
+      context: .
+      dockerfile: Dockerfile.comfy
+    image: sd-forge-docker-comfy:0.33.3
+    <<: *gpu
+    volumes:
+      - "/data2/forge-data:/data"
+    restart: always

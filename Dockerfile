@@ -66,6 +66,14 @@ RUN chmod +x /app/vae_bake.py
 # ControlNet fix for txt2img + Tile (HiRes Fix support)
 COPY controlnet.py /app/webui/extensions-builtin/sd_forge_controlnet/scripts/controlnet.py
 
+# Krea 2 / Z-Image を ComfyUI へ振り分けるルーター拡張。
+# 拡張は --data-dir 配下(バインドマウント)から読まれるため、イメージ内に置いても
+# マウントで隠れる。ここでは退避先に焼き込み、ENTRYPOINT で配置する。
+# 配置は毎起動 rm -rf してから行う。cp -r は宛先が既にあると入れ子になり
+# (comfy-router/comfy-router)、マウントに残った古い方が読まれ続けるため。
+# よってイメージ側が常に正で、マウント側を手で編集しても再起動で消える。
+COPY comfy/router /opt/comfy-router
+
 # webui ユーザーの作成と権限設定
 RUN useradd -m webui && \
     chown webui:webui /app/webui -R
@@ -80,6 +88,10 @@ ENV no_proxy="localhost, 127.0.0.1, ::1"
 
 ENTRYPOINT ["/bin/bash", "-c", "\
   chown -R 1000:1000 $USERDATA_DIR && \
+  mkdir -p $USERDATA_DIR/extensions && \
+  rm -rf $USERDATA_DIR/extensions/comfy-router && \
+  cp -r /opt/comfy-router $USERDATA_DIR/extensions/comfy-router && \
+  chown -R 1000:1000 $USERDATA_DIR/extensions/comfy-router && \
   civitconfig default --api-key $CIVITAI_TOKEN || true; \
   civitconfig alias --add @lora $USERDATA_DIR/models/Lora && \
   civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \

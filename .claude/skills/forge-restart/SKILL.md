@@ -23,7 +23,7 @@ description: Restart the Forge (sd-ui) container safely without killing an in-fl
 `sleep` 5秒間隔のような粗いポーリングだと、ジョブの切れ目を逃して待ち続けるか、逆に走行中に殺す。**1秒間隔**で、**連続2回**アイドルを確認してから落とす。
 
 ```bash
-cd /home/ssakurai/sd-forge-docker
+cd <このリポジトリのルート>
 idle=0
 while [ $idle -lt 2 ]; do
   j=$(curl -s -m 5 http://127.0.0.1:7680/sdapi/v1/progress \

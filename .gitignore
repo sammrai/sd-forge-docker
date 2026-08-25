@@ -4,3 +4,7 @@ stable-diffusion-webui-forge/
 
 # Exclude the .keep file from being ignored
 !/data/.keep
+comfy-output
+comfy-input
+
+talk.txt
