@@ -11,8 +11,8 @@ civitdl で落とすだけ。コード変更は要らない。**このスキル�
 forge が判別できるアーキは固定されている。
 
 ```bash
-docker exec sd-forge-docker-sdui-1 sh -c 'ls /app/webui/backend/diffusion_engine/'
-docker exec sd-forge-docker-sdui-1 sh -c \
+docker compose exec -T sdui sh -c 'ls /app/webui/backend/diffusion_engine/'
+docker compose exec -T sdui sh -c \
   'grep "^class " /app/webui/repositories/huggingface_guess/huggingface_guess/model_list.py'
 ```
 
@@ -23,8 +23,9 @@ docker exec sd-forge-docker-sdui-1 sh -c \
 # 対象コードの構造
 
 実体は **`comfy/router/scripts/comfy_router.py`**（このリポジトリ）。
-sdui へは `./comfy/router:/app/data/extensions/comfy-router:ro` でバインドマウントされる。
-**リポジトリ側を編集する。** `/data2/forge-data/extensions/` にコピーを置かない。
+**このファイルはイメージに焼き込まれる**（`Dockerfile` の `COPY comfy/router /opt/comfy-router`）。
+ENTRYPOINT が起動のたびに `rm -rf` してから `/app/data/extensions/` へ配置し直すので、
+コンテナ内を直接編集しても次の起動で消える。**必ずリポジトリ側を編集する。**
 
 ```
 comfy_router.py
@@ -337,19 +338,29 @@ Krea 2 は 4Mpx を直接生成できるが、実測（direct 346.0s / esrgan_2p
 
 ## 9. 反映
 
-拡張の編集だけなら `restart`、`docker-compose.yml` を変えたら `up -d`。
+**ルーターはイメージ同梱なので、`restart` では反映されない。再ビルドとコンテナ再作成が要る。**
 手順は `forge-restart` スキル。**再起動前に他セッションへ一報**（切れ目を掴んだ瞬間に
 落とすので相手からは予告なく 502 が始まる）。
 
 ### 反映済みかを推測しない
 
-バインドマウントなので**再起動した時点でディスク上の最新コードが読まれる**。
-「まだ反映していない」と思い込んで不要な再起動や停止依頼をしたことがある。
+「コードを直した」と「稼働中のプロセスがそれを読んでいる」は別。ここを混同して、
+反映されていないコードを相手にデバッグし続けたことがある。**必ず実物を確認する。**
 
 ```bash
-docker exec sd-forge-docker-sdui-1 sh -c \
-  'grep -n "<足した識別子>" /app/data/extensions/comfy-router/scripts/comfy_router.py'
+docker compose exec -T sdui sh -c \
+  'grep -c "<足した識別子>" /app/data/extensions/comfy-router/scripts/comfy_router.py'
 ```
+
+ただしファイルが新しくても**プロセスは古いことがある**。Python は起動時に import する
+ので、コンテナの起動時刻がファイルの mtime より古ければ、そのコードは動いていない。
+
+```bash
+docker inspect -f '{{.State.StartedAt}}' $(docker compose ps -q sdui)
+stat -c %y comfy/router/scripts/comfy_router.py
+```
+
+ログに出る固有の文言が現ファイルと食い違っていないかも有効な判定材料になる。
 
 「コード修正済み」と「稼働中に反映済み」を**区別して伝える**。
 
@@ -366,7 +377,7 @@ docker exec sd-forge-docker-sdui-1 sh -c \
 顔が潰れていることがある。網目状・鱗状の反復パターンはサンプラー不適合か解像度超過のサイン。
 
 ```bash
-docker exec sd-forge-docker-sdui-1 bash -lc "cd /app/webui && python3 -c '
+docker compose exec -T sdui bash -lc "cd /app/webui && python3 -c '
 import sys; sys.path.insert(0, \"/app/data/extensions/adetailer\")
 from adetailer.common import get_models
 from adetailer.ultralytics import ultralytics_predict
@@ -619,7 +630,7 @@ Civitai 画像のメタから steps/cfg をそのまま取るので、turbo 画�
 curl -s -m 10 -o /dev/null -w "forge   %{http_code}\n" http://127.0.0.1:7680/sdapi/queue/login
 curl -s -m 10 -o /dev/null -w "civitdl %{http_code}\n" http://127.0.0.1:7680/civitdl/models/
 iostat -x 1 2 | grep "^sdb"                                       # %util 97% なら飽和
-docker inspect -f '{{.State.StartedAt}}' sd-forge-docker-sdui-1   # 再起動直後か
+docker inspect -f '{{.State.StartedAt}}' $(docker compose ps -q sdui)   # 再起動直後か
 ```
 
 実例: forge は 200 なのに 502 と報告された → civitdl のワーカー占有。別の回は
@@ -630,7 +641,7 @@ forge の再起動ウィンドウ。**決めつけない。**
 # 完了条件
 
 - [ ] `MODEL_SPECS` にエントリが入り、拡張がロードされている
-      `docker logs sd-forge-docker-sdui-1 2>&1 | grep "comfy-router] wrapped"`
+      `docker compose logs sdui 2>&1 | grep "comfy-router] wrapped"`
 - [ ] キュー経由で base 生成が通り、顔を等倍で見て破綻がない
 - [ ] クライアントの E2E チェックリスト A〜F がすべて合格
 - [ ] 変更をコミット（**コミットは都度ユーザーの承認を取る**）

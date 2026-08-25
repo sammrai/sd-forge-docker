@@ -8,3 +8,4 @@ comfy-output
 comfy-input
 
 talk.txt
+docker-compose.override.yml

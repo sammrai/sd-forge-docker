@@ -365,15 +365,13 @@ def _normalize_sampling(req, spec, is_raw=False):
         _log(f"RAW variant detected: steps/cfg は矯正せず送信値を使う "
              f"(steps={steps} cfg={cfg})")
         return steps, cfg
-    steps, cfg = spec["steps"], spec["cfg"]
-    notes = []
-    if req_steps and req_steps != steps:
-        notes.append(f"steps {req_steps}->{steps}")
-    if req_cfg and abs(req_cfg - cfg) > 1e-6:
-        notes.append(f"cfg {req_cfg}->{cfg}")
-    if notes:
-        _log(f"turbo normalize: {', '.join(notes)} "
-             f"(蒸留モデルのため spec 値を使用)")
+    # 送信値をそのまま使う。値の決定はクライアントの責任で、ルーターは書き換えない
+    # (書き換えると EXIF に送っていない値が残り、クライアントから制御もできない)。
+    steps = req_steps or spec["steps"]
+    cfg = req_cfg if req_cfg else spec["cfg"]
+    if abs(cfg - spec["cfg"]) > 1e-6:
+        _log(f"WARN: cfg={cfg} は cfg={spec['cfg']} で蒸留されたモデルには不適合。"
+             f"送信値のまま使用する。")
     return steps, cfg
 
 
@@ -390,12 +388,11 @@ def _normalize_sampler(sampler, scheduler, spec):
     こちら側で吸収する(クライアントに分岐を実装させない)。
     turbo で実用になることを確認済みのサンプラーが明示された場合はそれを尊重する。
     """
-    if sampler in TURBO_SAFE_SAMPLERS:
-        return sampler, scheduler
-    _log(f"turbo normalize: sampler {sampler}/{scheduler} -> "
-         f"{spec['sampler']}/{spec['scheduler']} "
-         f"(蒸留モデルに不適合なため矯正)")
-    return spec["sampler"], spec["scheduler"]
+    if sampler not in TURBO_SAFE_SAMPLERS:
+        _log(f"WARN: sampler {sampler}/{scheduler} は 8step 蒸留モデルで破綻する "
+             f"(安全リスト: {', '.join(sorted(TURBO_SAFE_SAMPLERS))})。"
+             f"送信値のまま使用する。")
+    return sampler, scheduler
 
 
 def _warn_unsupported(req, spec):
@@ -514,6 +511,49 @@ def _build_txt2img(spec, prompt, neg, w, h, steps, cfg, seed, batch,
     return g
 
 
+def _model_hash(name):
+    """forge と同じ方法で checkpoint の shorthash を出す。
+
+    ルーター経由のモデルは forge が一度もロードしないため、forge 側では
+    hash が付かず info.sd_model_hash が null のままになる(213 モデル中
+    189 に hash があり、comfy 行きのものだけ全滅していた)。
+    forge の hashes.sha256 をそのまま使うので、キャッシュも
+    /sdapi/v1/sd-models への反映もネイティブと同じ経路に乗る。
+    初回だけファイル全体を読むので HDD では 1 分以上かかる。
+    """
+    if not name:
+        return None
+    try:
+        from modules import sd_models, hashes
+        ci = sd_models.get_closet_checkpoint_match(name)
+        if ci is None:
+            return None
+        sha = hashes.sha256(ci.filename, f"checkpoint/{ci.name}")
+        return sha[0:10] if sha else None
+    except Exception as e:
+        _log(f"WARN: model hash failed for {name!r}: {e}")
+        return None
+
+
+class _Interrupted(Exception):
+    """クライアントが /sdapi/v1/interrupt を叩いた。"""
+
+
+def _cancel_comfy(pid):
+    """走っている prompt を止め、キュー待ちなら取り下げる。
+
+    /api/interrupt は「いま実行中のもの」しか止めないので、キューに積まれた
+    ぶんは /api/queue の delete で消す必要がある。両方投げる。
+    """
+    for path, body in (("/api/interrupt", {}), ("/api/queue", {"delete": [pid]})):
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                COMFY_URL + path, data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"}), timeout=15).read()
+        except Exception as e:
+            _log(f"WARN: {path} failed: {e}")
+
+
 def _submit_and_wait(graph, st, step_offset=0, node_offsets=None):
     """comfy にワークフローを投げ、ws で進捗を受けながら完了まで待つ。
 
@@ -538,11 +578,22 @@ def _submit_and_wait(graph, st, step_offset=0, node_offsets=None):
         pid = resp["prompt_id"]
 
         last_value, last_max, inner_offset = 0, 0, 0
+        last_msg = time.time()
         while True:
+            # forge の中断フラグを見る。recv を 600s でブロックすると中断に
+            # 気づけないので、短い timeout で回して毎周チェックする。
+            if getattr(st, "interrupted", False) or getattr(st, "skipped", False):
+                _log("interrupt requested -> cancelling comfy job")
+                _cancel_comfy(pid)
+                raise _Interrupted()
             try:
-                raw = ws.recv(timeout=600)
+                raw = ws.recv(timeout=1.0)
             except TimeoutError:
-                raise RuntimeError("comfy did not respond within 600s")
+                if time.time() - last_msg > 600:
+                    _cancel_comfy(pid)
+                    raise RuntimeError("comfy did not respond within 600s")
+                continue
+            last_msg = time.time()
             if isinstance(raw, (bytes, bytearray)):
                 continue  # プレビュー画像のバイナリフレームは使わない
             msg = json.loads(raw)
@@ -772,6 +823,13 @@ def _detect(unit, pil):
             pred = admask.filter_k_largest(pred, k)
     if not pred.masks:
         return []
+    # 本物の ADetailer は filter のあとに並べ替える(pred_preprocessing)。
+    # 順序はユニットごとの seed(seed + i)に効くので、揃えないと再現しない。
+    try:
+        from adetailer.args import BBOX_SORTBY
+        pred = admask.sort_bboxes(pred, BBOX_SORTBY.index(BBOX_SORTBY[0]))
+    except Exception as e:
+        _log(f"WARN: bbox sort skipped ({e})")
     return admask.mask_preprocess(
         pred.masks,
         kernel=int(unit.get("ad_dilate_erode", 4) or 0),
@@ -780,8 +838,40 @@ def _detect(unit, pil):
         merge_invert=unit.get("ad_mask_merge_invert", "None") or "None")
 
 
+def _expand_crop_region(crop_region, pw, ph, iw, ih):
+    """クロップ枠を処理解像度のアスペクトに合わせて広げる。
+
+    forge modules/masking.py の expand_crop_region と同じ計算。これをやらずに
+    クロップをそのまま pw x ph に伸ばすと、貼り戻したときに顔が縦横に歪む。
+    """
+    x1, y1, x2, y2 = crop_region
+    if (x2 - x1) / (y2 - y1) > pw / ph:
+        diff = int((x2 - x1) / (pw / ph) - (y2 - y1))
+        y1 -= diff // 2
+        y2 += diff - diff // 2
+        if y2 >= ih:
+            y1 -= y2 - ih
+            y2 = ih
+        if y1 < 0:
+            y2 -= y1
+            y1 = 0
+        y2 = min(y2, ih)
+    else:
+        diff = int((y2 - y1) * (pw / ph) - (x2 - x1))
+        x1 -= diff // 2
+        x2 += diff - diff // 2
+        if x2 >= iw:
+            x1 -= x2 - iw
+            x2 = iw
+        if x1 < 0:
+            x2 -= x1
+            x1 = 0
+        x2 = min(x2, iw)
+    return max(0, x1), max(0, y1), x2, y2
+
+
 def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offset,
-                        unet=None):
+                        unet=None, pw=None, ph=None):
     """1ユニット分の ADetailer。検出→クロップ→comfy で inpaint→貼り戻し。
 
     ad_inpaint_only_masked 相当のクロップ処理を forge 側で行うので、comfy 側は
@@ -805,6 +895,17 @@ def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offs
     only_masked = bool(unit.get("ad_inpaint_only_masked", True))
     pad = int(unit.get("ad_inpaint_only_masked_padding", 32) or 0)
 
+    # inpaint 解像度。A1111 は ad_use_inpaint_width_height が偽なら
+    # **元の生成解像度**(p.width / p.height)で描き直す
+    # (adetailer scripts/!adetailer.py の get_width_height)。
+    # クロップ実寸で描くと Krea2/Z-Image では学習分布外の小解像度になり顔が崩れる。
+    if unit.get("ad_use_inpaint_width_height"):
+        iw = _align(int(unit.get("ad_inpaint_width", 512) or 512))
+        ih = _align(int(unit.get("ad_inpaint_height", 512) or 512))
+    else:
+        iw = _align(int(pw or pil.width))
+        ih = _align(int(ph or pil.height))
+
     result = pil.copy()
     done = 0
     for i, m in enumerate(masks):
@@ -816,9 +917,8 @@ def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offs
             x0, y0, x1, y1 = box
             x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
             x1, y1 = min(result.width, x1 + pad), min(result.height, y1 + pad)
-            # latent は 8px 単位。切り上げて枠内に収める。
-            x1 = min(result.width, x0 + _align(x1 - x0, 8))
-            y1 = min(result.height, y0 + _align(y1 - y0, 8))
+            x0, y0, x1, y1 = _expand_crop_region((x0, y0, x1, y1), iw, ih,
+                                                 result.width, result.height)
         else:
             x0, y0, x1, y1 = 0, 0, result.width, result.height
         if x1 - x0 < 16 or y1 - y0 < 16:
@@ -826,12 +926,6 @@ def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offs
 
         crop = result.crop((x0, y0, x1, y1))
         cmask = m.crop((x0, y0, x1, y1))
-        # inpaint 解像度。ad_inpaint_width/height 指定があればそれに合わせる。
-        if unit.get("ad_use_inpaint_width_height"):
-            iw = _align(int(unit.get("ad_inpaint_width", 512) or 512))
-            ih = _align(int(unit.get("ad_inpaint_height", 512) or 512))
-        else:
-            iw, ih = _align(crop.width), _align(crop.height)
         work = crop.resize((iw, ih), Image.LANCZOS)
         wmask = cmask.resize((iw, ih), Image.LANCZOS)
         if blur > 0:
@@ -894,9 +988,18 @@ def _generate(req):
     is_raw = _is_raw_variant(unet)
 
     steps, cfg = _normalize_sampling(req, spec, is_raw=is_raw)
-    w = _align(int(getattr(req, "width", 1024) or 1024))
-    h = _align(int(getattr(req, "height", 1024) or 1024))
+    # 16px 丸めは latent の実装都合であってクライアントが知るべきことではない。
+    # 丸めた解像度で生成し、最後に要求解像度へ戻す(I/F として入出力を整合させる)。
+    req_w = int(getattr(req, "width", 1024) or 1024)
+    req_h = int(getattr(req, "height", 1024) or 1024)
+    w, h = _align(req_w), _align(req_h)
     batch = int(getattr(req, "batch_size", 1) or 1)
+    n_iter = int(getattr(req, "n_iter", 1) or 1)
+    if n_iter > 1:
+        raise RuntimeError(
+            f"n_iter={n_iter} は未対応です(ルーターは 1 バッチしか実行しません)。"
+            f"黙って枚数が減るのを避けるためエラーにしています。"
+            f"batch_size で指定するか、リクエストを分けてください。")
     seed = int(getattr(req, "seed", -1) or -1)
     if seed < 0:
         seed = int.from_bytes(os.urandom(4), "big")
@@ -974,7 +1077,8 @@ def _generate(req):
         new_images = []
         for im in images:
             out, done = _run_adetailer_unit(spec, im, unit, prompt, neg, cfg, seed,
-                                            loras, st, offset, unet=unet)
+                                            loras, st, offset, unet=unet,
+                                            pw=gw, ph=gh)
             new_images.append(out)
             offset += spec["steps"] * max(1, done)
         images = new_images
@@ -989,6 +1093,14 @@ def _generate(req):
         b64.append(_b64.b64encode(buf.getvalue()).decode())
 
     _log(f"done in {time.time() - t0:.1f}s ({len(b64)} image(s))")
+
+    # 丸めて生成したぶんを要求解像度の比率へ戻す。HR 有効時は倍率が乗ったまま。
+    if (w, h) != (req_w, req_h):
+        from PIL import Image as _Im
+        images = [im.resize((max(1, round(im.width * req_w / w)),
+                             max(1, round(im.height * req_h / h))), _Im.LANCZOS)
+                  for im in images]
+        _log(f"  resolution restore: {w}x{h} -> {req_w}x{req_h} 相当へリサイズ")
 
     extra = {"Backend": f"comfy/{spec['name']}-raw" if is_raw
              else f"comfy/{spec['name']}"}
@@ -1005,7 +1117,7 @@ def _generate(req):
         extra["Lora"] = ", ".join(f"{n}:{v}" for n, v in loras)
 
     infotext = _make_infotext(spec, prompt, neg, steps, sampler, scheduler, cfg,
-                              seed, gw, gh, model, loras)
+                              seed, req_w, req_h, model, loras)
     count = len(b64)
     info = {
         "prompt": prompt, "all_prompts": [prompt] * count,
@@ -1014,10 +1126,10 @@ def _generate(req):
         "subseed": seed, "all_subseeds": [seed] * count,
         # ネイティブは int の 0 を返す。float だと型が変わるので合わせる。
         "subseed_strength": 0,
-        "width": gw, "height": gh, "sampler_name": sampler, "cfg_scale": cfg,
+        "width": req_w, "height": req_h, "sampler_name": sampler, "cfg_scale": cfg,
         "steps": steps, "batch_size": batch, "restore_faces": False,
         "face_restoration_model": None, "sd_model_name": model,
-        "sd_model_hash": None, "sd_vae_name": None, "sd_vae_hash": None,
+        "sd_model_hash": _model_hash(model), "sd_vae_name": None, "sd_vae_hash": None,
         "seed_resize_from_w": -1, "seed_resize_from_h": -1,
         # ネイティブは送った値をそのまま返す。HR の実現方式が違うため生成には
         # 使っていないが、値としてはエコーバックして互換を保つ。
@@ -1043,33 +1155,17 @@ def _generate(req):
     raw = _req_dict(req)
     params = dict(raw)
 
-    # どのキーを反映しどれを送信値のまま返すかは、**クライアントがその値に
-    # 合わせにいけるかどうか**で分ける。この規則は片方だけ見ると一貫していないように
-    # 見えるので、触る前にここを読むこと。
+    # **ルーターは送信されたパラメータを書き換えない。** 値の決定はクライアントの
+    # 責任で、ルーターが決めると EXIF に送っていない値が残り、クライアントから
+    # 制御する手段も無くなる。したがって params は送信値そのまま(dict(raw))。
     #
-    #   矯正(クライアントが従える) -> parameters に反映する
-    #     steps / cfg_scale / sampler_index / sampler_name / scheduler / width / height
-    #     クライアントは spec 準拠の値を送れば矯正を回避でき、予測が成立する。
-    #
-    #   無視(ルーター内部の固定値で、クライアントからは制御不能) -> 送信値のまま返す
-    #     denoising_strength / hr_cfg / hr_upscaler / hr_second_pass_steps
-    #     spec の hr_denoise=0.33 や hr_steps=5 を反映すると、クライアントは合わせる
-    #     手段が無いので予測が永久に外れる。実態は info.extra_generation_params で追う。
-    def _echo(key, value):
-        if raw.get(key) is not None:
-            params[key] = value
-
-    _echo("steps", steps)
-    _echo("cfg_scale", cfg)
-    _echo("sampler_index", sampler)
-    _echo("sampler_name", sampler)
-    _echo("scheduler", scheduler)
+    #   生成に使う値(steps / cfg_scale / sampler / scheduler)-> 送信値をそのまま使う
+    #   HR の 2nd パス設定(denoising_strength / hr_* )-> 無視するが送信値を返す
+    #     実際に使った内部値は info.extra_generation_params に載せる
+    #   width / height -> 16px 丸めは内部で吸収し、要求解像度を返す
     # A1111 は hires 有効時も `parameters` / infotext の Size は 1 パス目の解像度を保ち、
     # 倍率は `Hires upscale` で別に持つ(実ファイルだけが 2 倍になる)。
-    # つまり width/height は「モデルに入力した解像度」を指す。丸め(1928->1920)は
-    # 入力そのものが変わるので反映し、HR の拡大は反映しない。
-    _echo("width", gw)
-    _echo("height", gh)
+    # つまり width/height は「1 パス目の要求解像度」を指す。
     return b64, info, params
 
 
@@ -1094,6 +1190,13 @@ def _wrap_txt2img(app: FastAPI):
             images, info, params = _generate(txt2imgreq)
             return api_models.TextToImageResponse(
                 images=images, parameters=params, info=json.dumps(info))
+        except _Interrupted:
+            # ネイティブ forge は中断を例外にせず、生成済みのぶんを返して正常終了する。
+            # comfy は中断時に画像を出さないので images は空になる。
+            _log("interrupted; returning empty result (native forge と同じ扱い)")
+            return api_models.TextToImageResponse(
+                images=[], parameters=_req_dict(txt2imgreq),
+                info=json.dumps({"infotexts": [], "interrupted": True}))
         except Exception as e:
             _log(f"ERROR: {e!r}")
             raise
