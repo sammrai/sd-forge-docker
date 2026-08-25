@@ -26,7 +26,9 @@ RUN apt update && \
         python3-pip
 
 # setuptools 70+ で pkg_resources が分離され、CLIP など旧来 setup.py が壊れるため
-# build-isolation も含め全 pip install で setuptools<70 にピン
+# setuptools<70 にピンする。ただし **PIP_CONSTRAINT は build-isolation 環境には
+# 効かない**(pip 26 で確認。分離環境には制約が伝わらず 70+ が入る)。
+# CLIP のように pkg_resources を import する setup.py は --no-build-isolation で入れる。
 RUN echo 'setuptools<70' > /etc/pip-constraints.txt
 ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
 
@@ -46,8 +48,13 @@ RUN git clone https://github.com/lllyasviel/stable-diffusion-webui-forge.git web
 # Python の依存関係をインストール
 RUN pip install -r webui/requirements_versions.txt
 
-# Forge 起動時に毎回 pip install されないよう CLIP をシステム側へプリインストール
-RUN pip install https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
+# Forge 起動時に毎回 pip install されないよう CLIP をシステム側へプリインストール。
+# --no-build-isolation でシステムの setuptools<70 を使わせる。付けないと分離環境に
+# setuptools 70+ が入り "No module named 'pkg_resources'" で落ちる。
+# レジストリキャッシュが効いている間はこのレイヤが再実行されず、壊れていても
+# 気づけない。キャッシュを張り替えたときに初めて表面化する。
+RUN pip install --no-build-isolation \
+    https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
 
 # ADetailer 拡張(data ボリューム常駐)の依存をシステム側へプリインストール。
 # forge は webui(非root)で起動するため拡張の自動 install は --user(~/.local)に入り
