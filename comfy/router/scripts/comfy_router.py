@@ -53,9 +53,12 @@ MODEL_SPECS = [
         "scheduler": "simple",
         "steps": 8,
         "cfg": 1.0,
-        # HR の 2nd pass は base とサンプラーが異なる(公式アップスケーラ準拠)
-        "hr_sampler": "dpmpp_2m_sde",
-        "hr_scheduler": "beta",
+        # HR の 2nd pass も base と同じサンプラーを使う。公式アップスケーラの
+        # テンプレートは dpmpp_2m_sde/beta だったが、それは TURBO_SAFE_SAMPLERS の
+        # 外側で、8step 蒸留モデルで破綻することをこちらで実測済みの系統。
+        # テンプレートの前提(step 数・モデル)が違うものをそのまま持ち込んでいた。
+        "hr_sampler": "euler",
+        "hr_scheduler": "simple",
         "hr_steps": 5,
         # 直接生成(346.0s)と ESRGAN 2パス(300.6s)を同一プロンプト・シードで比較し、
         # 画質に有意差が無く速度も 2パスがわずかに速かったため 2パスに統一した。
@@ -77,8 +80,9 @@ MODEL_SPECS = [
         "scheduler": "simple",
         "steps": 8,
         "cfg": 1.0,
-        "hr_sampler": "dpmpp_2m_sde",
-        "hr_scheduler": "beta",
+        # base と同じサンプラーを使う(dpmpp_2m_sde は安全リスト外。上の krea2 参照)
+        "hr_sampler": "res_multistep",
+        "hr_scheduler": "simple",
         "hr_steps": 5,
         # Z-Image は直接生成すると網目状の劣化が出る(実測)。公式に 2K アップスケーラの
         # テンプレートがあるのはこのためと思われる。ESRGAN でモデル拡大してから
