@@ -53,10 +53,8 @@ services:
     restart: always
 
   comfy:
-    build:
-      context: .
-      dockerfile: Dockerfile.comfy
-    image: sd-forge-docker-comfy:0.33.3
+    # タグは ComfyUI のバージョン。Dockerfile.comfy の ARG COMFY_REF と揃える。
+    image: sammrai/sd-forge-docker:comfy-0.33.3
     <<: *gpu
     volumes:
       - "/data2/forge-data:/data"
