@@ -22,7 +22,7 @@ services:
 
   sdui:
     # タグは CUDA バージョン。CI が main へのコミット毎に上書きする。
-    image: sammrai/sd-forge-docker:12.4.0
+    image: ghcr.io/sammrai/sd-forge-docker:12.4.0
     <<: *gpu
     volumes:
       - "/data2/forge-data:/app/data"
@@ -54,7 +54,7 @@ services:
 
   comfy:
     # タグは ComfyUI のバージョン。Dockerfile.comfy の ARG COMFY_REF と揃える。
-    image: sammrai/sd-forge-docker:comfy-0.33.3
+    image: ghcr.io/sammrai/sd-forge-docker:comfy-0.33.3
     <<: *gpu
     volumes:
       - "/data2/forge-data:/data"
