@@ -1,0 +1,38 @@
+# ComfyUI から forge/civitdl と同じ A1111 レイアウトのモデルツリーを読むための設定。
+# 実体は /data2/forge-data(コンテナ内 /data)ひとつだけ。civitdl が落としたものも
+# HF から入れたものも同じ場所に置き、二重管理しない。
+a111:
+    base_path: /data
+
+    # civitdl は Civitai の type=Checkpoint をここに置く(SDXL 等の all-in-one)。
+    checkpoints: models/Stable-diffusion
+
+    # Krea 2 / Z-Image は all-in-one ではなく diffusion model 単体(TE と VAE が別)。
+    # civitdl は type=Checkpoint として Stable-diffusion に置くので、UNETLoader からも
+    # 同じディレクトリが見えるように併記する。これで civitdl 側は改造不要。
+    diffusion_models: |
+        models/Stable-diffusion
+        models/diffusion_models
+
+    # forge の慣習は単数形 text_encoder。qwen_3_4b.safetensors は既にここにある。
+    text_encoders: models/text_encoder
+
+    vae: models/VAE
+
+    loras: |
+        models/Lora
+        models/LyCORIS
+
+    upscale_models: |
+        models/ESRGAN
+        models/RealESRGAN
+        models/SwinIR
+        models/DAT
+
+    embeddings: embeddings
+    hypernetworks: models/hypernetworks
+    controlnet: models/ControlNet
+
+    # ADetailer の YOLO 重み。検出とマスク生成は forge 側の本物の ADetailer が行う方針
+    # なので通常は使わないが、comfy 単体で検証する場合のために通しておく。
+    ultralytics: models/adetailer

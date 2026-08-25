@@ -1,0 +1,68 @@
+# ComfyUI コンテナ。Krea 2 / Z-Image など forge(lllyasviel backend)が
+# 対応しないアーキ専用のバックエンドとして使う。
+# SDXL/SD1.5/Flux は従来どおり forge 側で処理するため、こちらには載せない。
+#
+# GPU は sdui と共有する。同時に常駐すると 12GB では溢れるため、
+# 生成の直列化と VRAM の明け渡しは forge 側の単一キューが制御する
+# (forge: /sdapi/v1/unload-checkpoint / comfy: POST /free)。
+ARG CUDA_VERSION=12.8.1
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+# ComfyUI のバージョンは必ず固定する。Krea 2 は v0.26.0 以降でネイティブ対応。
+ARG COMFY_REF=v0.33.3
+
+RUN apt update && \
+    apt install -y --no-install-recommends \
+        git \
+        python3 \
+        python3-pip \
+        python3-venv \
+        libgl1 \
+        libglib2.0-0 \
+        ca-certificates \
+        curl && \
+    apt clean && rm -rf /var/lib/apt/lists/*
+
+# ubuntu24.04 の python は PEP668 で外部管理扱いになり pip が拒否するため venv を使う。
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# torch は CUDA 12.8 ホイールを明示的に入れる(requirements.txt の裸の `torch` に
+# 解決させると CPU 版や別 CUDA 版が入りうる)。ホストドライバ 580 は CUDA 13 まで対応。
+RUN pip install --no-cache-dir torch torchvision torchaudio \
+        --index-url https://download.pytorch.org/whl/cu128
+
+RUN git clone https://github.com/comfyanonymous/ComfyUI /app/comfy && \
+    cd /app/comfy && git checkout ${COMFY_REF}
+
+RUN pip install --no-cache-dir -r /app/comfy/requirements.txt
+
+# モデルパス設定を焼き込む(compose のマウントを増やさない)
+COPY comfy/extra_model_paths.yaml /app/comfy/extra_model_paths.yaml
+
+WORKDIR /app/comfy
+
+# モデルは A1111 レイアウト(/data = forge と共有)を extra_model_paths.yaml 経由で読む。
+# 出力・入力・user データのみ comfy 専用ディレクトリに書く。
+#
+# --database-url を明示するのは、既定値が cli_args.py の位置から
+# `<comfy>/user/comfyui.db` を組み立てており **--user-directory を無視する**ため。
+# 未指定だとイメージ内に無い /app/comfy/user を開こうとして
+# "Failed to initialize database ... unable to open database file" になる。
+ENV COMFY_DATA=/data/comfy
+# Z-Image の HiRes で確保ピークが跳ねた件の対策(断片化の緩和)。
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+EXPOSE 8188
+
+CMD ["sh", "-c", "\
+    mkdir -p $COMFY_DATA/output $COMFY_DATA/input $COMFY_DATA/temp $COMFY_DATA/user && \
+    exec python3 main.py \
+        --listen 0.0.0.0 --port 8188 \
+        --extra-model-paths-config /app/comfy/extra_model_paths.yaml \
+        --output-directory $COMFY_DATA/output \
+        --input-directory $COMFY_DATA/input \
+        --temp-directory $COMFY_DATA/temp \
+        --user-directory $COMFY_DATA/user \
+        --database-url sqlite:///$COMFY_DATA/user/comfyui.db \
+"]

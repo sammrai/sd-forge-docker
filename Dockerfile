@@ -26,7 +26,9 @@ RUN apt update && \
         python3-pip
 
 # setuptools 70+ で pkg_resources が分離され、CLIP など旧来 setup.py が壊れるため
-# build-isolation も含め全 pip install で setuptools<70 にピン
+# setuptools<70 にピンする。ただし **PIP_CONSTRAINT は build-isolation 環境には
+# 効かない**(pip 26 で確認。分離環境には制約が伝わらず 70+ が入る)。
+# CLIP のように pkg_resources を import する setup.py は --no-build-isolation で入れる。
 RUN echo 'setuptools<70' > /etc/pip-constraints.txt
 ENV PIP_CONSTRAINT=/etc/pip-constraints.txt
 
@@ -46,8 +48,13 @@ RUN git clone https://github.com/lllyasviel/stable-diffusion-webui-forge.git web
 # Python の依存関係をインストール
 RUN pip install -r webui/requirements_versions.txt
 
-# Forge 起動時に毎回 pip install されないよう CLIP をシステム側へプリインストール
-RUN pip install https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
+# Forge 起動時に毎回 pip install されないよう CLIP をシステム側へプリインストール。
+# --no-build-isolation でシステムの setuptools<70 を使わせる。付けないと分離環境に
+# setuptools 70+ が入り "No module named 'pkg_resources'" で落ちる。
+# レジストリキャッシュが効いている間はこのレイヤが再実行されず、壊れていても
+# 気づけない。キャッシュを張り替えたときに初めて表面化する。
+RUN pip install --no-build-isolation \
+    https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
 
 # ADetailer 拡張(data ボリューム常駐)の依存をシステム側へプリインストール。
 # forge は webui(非root)で起動するため拡張の自動 install は --user(~/.local)に入り
@@ -66,6 +73,14 @@ RUN chmod +x /app/vae_bake.py
 # ControlNet fix for txt2img + Tile (HiRes Fix support)
 COPY controlnet.py /app/webui/extensions-builtin/sd_forge_controlnet/scripts/controlnet.py
 
+# Krea 2 / Z-Image を ComfyUI へ振り分けるルーター拡張。
+# 拡張は --data-dir 配下(バインドマウント)から読まれるため、イメージ内に置いても
+# マウントで隠れる。ここでは退避先に焼き込み、ENTRYPOINT で配置する。
+# 配置は毎起動 rm -rf してから行う。cp -r は宛先が既にあると入れ子になり
+# (comfy-router/comfy-router)、マウントに残った古い方が読まれ続けるため。
+# よってイメージ側が常に正で、マウント側を手で編集しても再起動で消える。
+COPY comfy/router /opt/comfy-router
+
 # webui ユーザーの作成と権限設定
 RUN useradd -m webui && \
     chown webui:webui /app/webui -R
@@ -80,6 +95,10 @@ ENV no_proxy="localhost, 127.0.0.1, ::1"
 
 ENTRYPOINT ["/bin/bash", "-c", "\
   chown -R 1000:1000 $USERDATA_DIR && \
+  mkdir -p $USERDATA_DIR/extensions && \
+  rm -rf $USERDATA_DIR/extensions/comfy-router && \
+  cp -r /opt/comfy-router $USERDATA_DIR/extensions/comfy-router && \
+  chown -R 1000:1000 $USERDATA_DIR/extensions/comfy-router && \
   civitconfig default --api-key $CIVITAI_TOKEN || true; \
   civitconfig alias --add @lora $USERDATA_DIR/models/Lora && \
   civitconfig alias --add @vae $USERDATA_DIR/models/VAE && \

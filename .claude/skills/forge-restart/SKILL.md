@@ -1,79 +1,112 @@
 ---
 name: forge-restart
-description: Restart the Forge (sd-ui) container safely without killing an in-flight generation. Use whenever the user asks to 再起動 / restart / reload Forge, sdui, or sd-forge-docker, or when a change to an extension, model file, or ADetailer patch needs to take effect. Covers waiting for the queue to drain, the correct compose command, waiting for the API to really be up, and verifying the reload.
+description: Restart or rebuild the Forge (sd-ui) container safely without killing an in-flight generation. Use whenever the user asks to 再起動 / restart / reload Forge, sdui, or sd-forge-docker, when a change to the comfy-router extension, a model file, or an ADetailer patch needs to take effect, or when edited code does not seem to be running. Covers deciding between restart and rebuild (the router is baked into the image, so restart alone does not pick it up), waiting for the queue to drain, local build overrides, waiting for the API to really be up, and verifying what the running process actually loaded.
 ---
 
 # Forge (sd-ui) の再起動
 
-このホストの Forge は**共有インスタンス**で、他のセッションやフロントエンドが同時に生成を投げてくる。再起動は進行中のジョブを問答無用で殺すため、手順を守ること。
+他セッションやフロントエンドが同時に生成を投げてくる**共有インスタンス**。再起動は
+進行中のジョブを問答無用で殺す。
 
-## 何をしたら再起動が要るか
+## restart か、再ビルドか
 
-| 変更 | 再起動 |
+| 変えたもの | 必要な操作 |
 |---|---|
-| 拡張の `.py` を編集した | **要る**（モジュールは起動時に1回 import される） |
-| `models/adetailer/` に**新しい名前**のモデルを置いた | **要る**（`model_mapping` は起動時に構築） |
-| 既存モデルの**中身を差し替え**た（同じパス） | 不要（`YOLO(path)` は毎回作り直される） |
-| `docker-compose.yml` を変えた | `restart` では反映されない → 下記参照 |
+| `comfy/router/`（イメージ同梱） | **再ビルド + 作り直し**。`restart` では反映されない |
+| `/app/data/extensions/` 配下のマウント上の拡張 | `restart` |
+| `models/adetailer/` に**新しい名前**のモデルを追加 | `restart`（`model_mapping` は起動時に構築） |
+| 既存モデルの中身を差し替え（同じパス） | 不要（`YOLO(path)` は毎回作り直される） |
+| `docker-compose.yml` | `up -d` |
+
+`comfy-router` はイメージに焼き込まれ、ENTRYPOINT が起動のたびに `rm -rf` してから
+`/app/data/extensions/` へ置き直す。**コンテナ内を直接編集しても次の起動で消える。**
+稼働中コンテナの状態ではなく compose の定義で判断すること。
 
 ## 手順
 
-### 1. キューが空くのを待ってから再起動する
+**ビルドを先に済ませる。** アイドルを掴んでからビルドすると、その数分で切れ目が消える。
+同じ理由で `up -d --build` の一体形は使わない。
 
-`sleep` 5秒間隔のような粗いポーリングだと、ジョブの切れ目を逃して待ち続けるか、逆に走行中に殺す。**1秒間隔**で、**連続2回**アイドルを確認してから落とす。
+### 1. ビルド（無停止。再ビルドが要る場合のみ）
 
 ```bash
-cd /home/ssakurai/sd-forge-docker
-idle=0
-while [ $idle -lt 2 ]; do
-  j=$(curl -s -m 5 http://127.0.0.1:7680/sdapi/v1/progress \
-      | python3 -c 'import sys,json;print(json.load(sys.stdin).get("state",{}).get("job") or "")' 2>/dev/null)
-  if [ -z "$j" ]; then idle=$((idle+1)); else idle=0; fi
-  sleep 1
-done
-docker compose restart sdui
+docker compose build sdui
 ```
 
-長引くことがあるので、この待機はバックグラウンド実行（`run_in_background: true`）に回してよい。
+`sdui` に `build:` は無いので、`docker-compose.override.yml` に足す（compose が自動で
+マージする。**`-f` を付けると自動読み込みが無効になる**）。`.gitignore` 済み。
 
-ユーザーが「今すぐ落とせ」と明示した場合のみ待たずに実行する。その場合、**進行中のジョブを潰した事実は必ず報告する**（`/sdapi/v1/progress` の `job` と `progress` を落とす前に記録しておく）。
-
-### 2. `restart` を使う。`up -d` や `down` は使わない
-
-```bash
-docker compose restart sdui      # これ
+```yaml
+services:
+  sdui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {CUDA_VERSION: "12.4.0", PYTORCH_VERSION: "2.4"}
+      cache_from: [sammrai/sd-forge-docker:cache-12.4.0]
 ```
 
-`up -d` は `docker-compose.yml` の未コミット変更を巻き込んで反映してしまう。バインドマウント上のファイル変更を反映したいだけなら `restart` で足りる（プロセスが再起動＝再 import されるため）。
+`cache_from` が無いと **torch から全ビルド**になる。publish 済みのタグを指すこと。
 
-`docker-compose.yml` 自体の変更（イメージ、ボリューム、`ARGS` 等）を反映する場合だけ `up -d` が必要。その場合は他に未コミットの変更が混ざっていないか `git diff docker-compose.yml` で先に確認する。
+### 2. アイドルを掴んで作り直す
 
-### 3. API の復帰は **HTTP 200** で待つ
+切れ目は短い。**0.2秒間隔で連続3回**アイドルを確認して即座に落とす。`curl` の起動コストが
+効くので Python で回す。長引くのでバックグラウンド実行に回す。
 
-`curl` は 502 を受け取っても**終了コード 0** を返す。到達性だけで判定すると、traefik が 502 を返している起動途中を「準備完了」と誤判定し、後続のリクエストが空応答になる。
-
-```bash
-until [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:7680/sdapi/v1/options)" = "200" ]; do
-  sleep 1
-done
+```python
+import time, urllib.request, json, subprocess
+idle = 0
+while idle < 3:
+    try:
+        d = json.load(urllib.request.urlopen(
+            "http://127.0.0.1:7680/sdapi/v1/progress", timeout=5))
+        idle = idle + 1 if not (d.get("state", {}).get("job") or "") else 0
+    except Exception:
+        idle = 0
+    if idle < 3:
+        time.sleep(0.2)
+subprocess.run(["docker", "compose", "up", "-d", "--no-deps", "sdui"], cwd="<repo>")
 ```
 
-### 4. 反映を確認する
+掴めるのは「直前まで空だった」ことだけ。**キューに積まれた分は落ちる**ので他セッションへ
+一報を入れる。`--no-deps` は `comfy` を巻き込まないため（GPU を握ったまま両方起動する）。
+
+「今すぐ落とせ」と言われた場合のみ待たずに実行し、**潰したジョブを必ず報告する**
+（落とす前に `/sdapi/v1/progress` の `job` と `progress` を記録）。
+
+### 3. 復帰は **HTTP 200** で待つ
+
+`curl` は 502 でも終了コード 0 を返す。到達性だけで判定すると起動途中を完了と誤判定する。
+起動には1〜2分かかる。
 
 ```bash
-docker logs sd-forge-docker-sdui-1 2>&1 | grep -a "ADetailer initialized" | tail -1
-# → [-] ADetailer initialized. version: 24.11.1, num models: 12
+until [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:7680/sdapi/v1/options)" = "200" ]; do sleep 1; done
 ```
 
-モデルを追加したなら件数が増えているはず。一覧そのものは:
+### 4. 何が動いているか確認する
+
+「コードを直した」と「プロセスがそれを読んでいる」は別。ファイルが新しくても、コンテナの
+起動時刻が mtime より古ければそのコードは動いていない。
 
 ```bash
-curl -s http://127.0.0.1:7680/adetailer/v1/ad_model
+docker compose exec -T sdui sh -c 'grep -c "<足した識別子>" /app/data/extensions/comfy-router/scripts/comfy_router.py'
+docker inspect -f '{{.State.StartedAt}}' $(docker compose ps -q sdui)
+docker compose logs sdui 2>&1 | grep -a "comfy-router\|ADetailer initialized" | tail -2
+```
+
+### 5. 終わったら override を消す
+
+このマシンは**開発環境と本番環境が同一**。`build:` を残すと、ローカルイメージが無い状態の
+`up -d` が CI のイメージを取りに行かず**ソースからビルドする**。しかも同じタグ名を
+上書きするので CI 産と区別が付かなくなる。
+
+```bash
+rm docker-compose.override.yml
+docker compose pull sdui     # 本番へ入れるときは CI が publish したものを使う
 ```
 
 ## 環境メモ
 
-- コンテナ名 `sd-forge-docker-sdui-1`、ポートは traefik 経由で `127.0.0.1:7680`
-- データは `/data2/forge-data` を `/app/data` にバインドマウント。拡張もモデルもこの下なので、**イメージを更新してもローカル改変は消えない**
-- 拡張は独立リポジトリ: `sammrai/adetailer`（private）、`sammrai/sd-queue`。拡張を編集したらそちらでコミットする。本体 `sd-forge-docker` とは別
-- 起動には1〜2分かかる（チェックポイントのロードを含む）
+- ポートは traefik 経由で `127.0.0.1:7680`。コンテナは compose のサービス名 `sdui` で指す
+- `/data2/forge-data` を `/app/data` にバインドマウント。モデルはこの下
+- ADetailer と sd-queue は別リポジトリの拡張

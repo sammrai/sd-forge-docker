@@ -6,6 +6,20 @@ on:
       - "main"
       - "test"
       - "gh-pages"
+  # PR ではビルドが通ることだけを確認する。タグにブランチ名が入らないため、
+  # publish すると main 以外からも本番タグ(:12.4.0)を上書きしてしまう。
+  pull_request:
+    branches:
+      - "main"
+
+# ghcr へ push するために必要。GITHUB_TOKEN で足りるので Docker Hub の
+# 認証情報(DOCKERHUB_USERNAME / DOCKERHUB_TOKEN)は不要になった。
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
   docker-build:
@@ -17,42 +31,88 @@ jobs:
             pytorch_version: 2.3.1
           - cuda_version: 12.4.0
             pytorch_version: 2.4
-    env:
-      IMAGE_NAME: ${{ github.repository }}
     steps:
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Adjutment docker volumes
+      - name: Free disk space
         run: |
-          docker system df
           docker system prune -a --volumes -f
-          docker system df
-          df
+          df -h /
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set short SHA
         run: echo "SHORT_SHA=${GITHUB_SHA::6}" >> $GITHUB_ENV
 
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             CUDA_VERSION=${{ matrix.cuda_version }}
             PYTORCH_VERSION=${{ matrix.pytorch_version }}
           tags: |
-            ${{ github.repository }}:${{ matrix.cuda_version }}-${{ env.SHORT_SHA }}
-            ${{ github.repository }}:${{ matrix.cuda_version }}
-          cache-from: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }}
-          cache-to: type=registry,ref=${{ github.repository }}:cache-${{ matrix.cuda_version }},mode=max
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.cuda_version }}-${{ env.SHORT_SHA }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.cuda_version }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:cache-${{ matrix.cuda_version }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:cache-{2},mode=max', env.REGISTRY, github.repository, matrix.cuda_version) || '' }}
 
+  # comfy イメージも sdui と同じく publish する。compose 側は image: 参照のみ。
+  # タグは Dockerfile.comfy の ARG COMFY_REF を唯一の出所とし、そこから導出する。
+  comfy-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          docker system prune -a --volumes -f
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tags
+        run: |
+          REF=$(grep -m1 '^ARG COMFY_REF=' Dockerfile.comfy | cut -d= -f2)
+          echo "COMFY_TAG=comfy-${REF#v}" >> $GITHUB_ENV
+          echo "SHORT_SHA=${GITHUB_SHA::6}" >> $GITHUB_ENV
+
+      # compose の image: は手書きなので、ARG COMFY_REF とずれたら気づけない。
+      - name: Check compose references the same tag
+        run: |
+          grep -q "sd-forge-docker:${COMFY_TAG}$" docker-compose.yml || {
+            echo "docker-compose.yml does not reference :${COMFY_TAG}"
+            grep -n 'sd-forge-docker:comfy' docker-compose.yml
+            exit 1
+          }
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.comfy
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ env.COMFY_TAG }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:${{ env.COMFY_TAG }}-${{ env.SHORT_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
