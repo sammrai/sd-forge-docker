@@ -9,3 +9,6 @@ comfy-input
 
 talk.txt
 docker-compose.override.yml
+
+# デバッグで受け取った生成画像(公開しない)
+image.png
