@@ -4,7 +4,7 @@
 #
 # GPU は sdui と共有する。同時に常駐すると 12GB では溢れるため、
 # 生成の直列化と VRAM の明け渡しは forge 側の単一キューが制御する
-# (forge: /sdapi/v1/unload-checkpoint / comfy: POST /free)。
+# (forge: /sdapi/v1/unload-checkpoint / comfy: POST /router/free_vram)。
 ARG CUDA_VERSION=12.8.1
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
 
@@ -41,6 +41,10 @@ RUN pip install --no-cache-dir -r /app/comfy/requirements.txt
 # モデルパス設定を焼き込む(compose のマウントを増やさない)
 COPY comfy/extra_model_paths.yaml /app/comfy/extra_model_paths.yaml
 
+# VRAM だけを返す解放エンドポイント(/api/router/free_vram)。forge のジョブが
+# 挟まっても RAM 上の重みを捨てずに済ませるために使う。詳細はファイル内の説明。
+COPY comfy/custom_nodes/ /app/comfy/custom_nodes/
+
 WORKDIR /app/comfy
 
 # モデルは A1111 レイアウト(/data = forge と共有)を extra_model_paths.yaml 経由で読む。
@@ -74,7 +78,8 @@ ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 #
 # 参考: --disable-mmap は試して効果が無かった(200.2s -> 203.6s)。重みの読み直しは
 # mmap の問題ではなく、生成ごとに /api/free で DynamicVRAM のステージを捨てて
-# いたのが原因だった。解放の遅延はルーター側(_install_lazy_release)で対処する。
+# いたのが原因だった。解放の遅延はルーター側(_install_lazy_release)で、解放時に
+# RAM を捨てない件は custom_nodes/partial_vram_free.py で対処する。
 EXPOSE 8188
 
 CMD ["sh", "-c", "\

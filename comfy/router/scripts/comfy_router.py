@@ -405,22 +405,52 @@ def _free_forge_vram():
         _log(f"WARN: forge VRAM release failed: {e!r}")
 
 
+def _post_comfy(path, payload, timeout=120):
+    req = urllib.request.Request(
+        COMFY_URL + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"})
+    body = urllib.request.urlopen(req, timeout=timeout).read()
+    try:
+        return json.loads(body or b"{}")
+    except ValueError:
+        return {}
+
+
 def _free_comfy_vram():
     """comfy は生成後もモデルを VRAM に保持し続けるため、明示的に解放させる。
     これを怠ると次の forge ジョブがロードに失敗する(実測 8GB 保持)。
 
-    **free_memory は送らない。** comfy の /api/free は2つのフラグで効果が別物で
-    (main.py の flags 処理)、unload_models は unload_all_models() を呼んで VRAM だけ
-    返すのに対し、free_memory は execution の reset() でノード出力キャッシュを作り直す。
-    後者を送るとロード済みモデルのオブジェクトごと捨てられ、次の生成が必ずディスクから
-    読み直しになる(実測: 連続生成でも毎回フルロード)。VRAM を返す目的には前者で足りる。
+    まず自前の `/api/router/free_vram` を試す(comfy/custom_nodes/partial_vram_free.py)。
+    こちらは VRAM だけを返し、RAM に載せた重みを残すので、forge のジョブが挟まっても
+    次の comfy 生成がディスクからの読み直しにならない。
+
+    使えなければ `/api/free` へ倒す。**その場合も free_memory は送らない。** comfy の
+    /api/free は2つのフラグで効果が別物で(main.py の flags 処理)、unload_models は
+    unload_all_models() を呼ぶのに対し、free_memory は execution の reset() でノード
+    出力キャッシュを作り直す。後者を送るとロード済みモデルのオブジェクトごと捨てられ、
+    ノード出力の再利用も効かなくなる。VRAM を返す目的には前者で足りる。
     """
+    global _partial_free_supported
+    if _partial_free_supported:
+        try:
+            res = _post_comfy("/api/router/free_vram", {"timeout": 60})
+            # mode=full は comfy 側で部分解放に失敗して全解放へ倒れた場合。
+            # VRAM は返っているが RAM の重みは残っていない。
+            kept = res.get("mode") == "partial"
+            _log(f"comfy VRAM released ({'RAM の重みは保持' if kept else 'RAM も解放'})")
+            return
+        except Exception as e:
+            # 404 = 拡張の入っていない古いイメージ。504 = worker が時間内に
+            # 処理できなかった。どちらも全解放へ倒せば VRAM だけは確実に返る。
+            code = getattr(e, "code", None)
+            if code == 404:
+                _partial_free_supported = False
+                _log("NOTE: comfy に /router/free_vram が無い。全解放へフォールバック")
+            else:
+                _log(f"WARN: partial VRAM release failed ({e!r}); 全解放へフォールバック")
     try:
-        req = urllib.request.Request(
-            COMFY_URL + "/api/free",
-            data=json.dumps({"unload_models": True}).encode(),
-            headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=120).read()
+        _post_comfy("/api/free", {"unload_models": True})
         _log("comfy VRAM released")
     except Exception as e:
         _log(f"WARN: comfy VRAM release failed: {e!r}")
@@ -432,6 +462,8 @@ def _free_comfy_vram():
 # VRAM を要求するまで遅らせる。
 _comfy_holds_vram = False
 _lazy_release_installed = False
+# 部分解放エンドポイントの有無。404 を一度見たら以降は問い合わせない。
+_partial_free_supported = True
 
 
 def _release_comfy_if_held():
