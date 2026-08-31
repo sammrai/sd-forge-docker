@@ -829,10 +829,16 @@ def _hr2pass(req, spec, hr):
 
 
 def _hr2pass_steps(hr2pass):
-    """2nd パスが実際に回すサンプリングステップ数(進捗の見積もり用)。"""
+    """2nd パスが実際に回すサンプリングステップ数(進捗の見積もり用)。
+
+    **denoise では割り引かない。** A1111 の img2img は denoising_strength で
+    実ステップ数が減るが、comfy はスケジュールの後ろだけを切り出すので回す本数は
+    `steps` ちょうど(samplers.py の set_steps: `sigmas[-(steps + 1):]`)。
+    割り引くと HR パスの進捗が実際より少なく見積もられ、ETA がずれる。
+    """
     if not hr2pass:
         return 0
-    return int(hr2pass["steps"] * hr2pass["denoise"]) + 1
+    return hr2pass["steps"]
 
 
 def _hr_params(req, spec, base_w, base_h, base_steps):
