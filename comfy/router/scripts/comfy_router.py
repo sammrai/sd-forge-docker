@@ -53,10 +53,10 @@ MODEL_SPECS = [
         "scheduler": "simple",
         "steps": 8,
         "cfg": 1.0,
-        # HR の 2nd pass も base と同じサンプラーを使う。公式アップスケーラの
-        # テンプレートは dpmpp_2m_sde/beta だったが、それは TURBO_SAFE_SAMPLERS の
-        # 外側で、8step 蒸留モデルで破綻することをこちらで実測済みの系統。
-        # テンプレートの前提(step 数・モデル)が違うものをそのまま持ち込んでいた。
+        # HR の 2nd pass の既定も base と同じサンプラーにする。公式アップスケーラの
+        # テンプレートは dpmpp_2m_sde/beta だが、テンプレートは step 数もモデルも
+        # 前提が違うため、そのまま持ち込むと破綻するのを実測した。
+        # あくまで未送信時の既定で、クライアントが送ればその値を使う。
         "hr_sampler": "euler",
         "hr_scheduler": "simple",
         "hr_steps": 5,
@@ -109,7 +109,9 @@ SAMPLER_MAP = {
     "dpm++ 2m sde": ("dpmpp_2m_sde", "normal"),
     "dpm++ 2m sde karras": ("dpmpp_2m_sde", "karras"),
     "dpm++ 3m sde": ("dpmpp_3m_sde", "normal"),
-    "restart": ("euler", "normal"),
+    # A1111 の Restart は comfy に対応が無い。以前は euler へ差し替えていたが、
+    # 別のサンプラーで生成されたことにクライアントが気づけないため削除した。
+    # 解決できない名前は _map_sampler_pair がエラーにする。
 }
 SCHEDULER_MAP = {
     "karras": "karras", "exponential": "exponential", "sgm uniform": "sgm_uniform",
@@ -190,8 +192,11 @@ def _resolve_unet(spec, requested):
     """クライアントが指定したチェックポイント名が comfy 側に実在すればそれを使う。
 
     振り分けは名前のパターンマッチで行うが、`z_image_turbo_bf16.safetensors` のように
-    同じアーキで別の量子化を指定したい場合がある。実在するならその指定を尊重し、
-    実在しなければ spec の既定(実運用で選んだ量子化)にフォールバックする。
+    同じアーキで別の量子化を指定したい場合がある。
+
+    **解決できない名前は spec 既定に落とさずエラーにする。** 落とすと、指定したのとは
+    別のモデルで生成されたことにクライアントは気づけない(parameters には指定名が返る)。
+    LoRA / hr_upscaler / sampler と同じ扱い。
     """
     name = (requested or "").strip()
     if not name:
@@ -199,11 +204,16 @@ def _resolve_unet(spec, requested):
     cat = _unet_catalog()
     hit = cat.get(name) or cat.get(os.path.basename(name))
     if hit is None:
-        hit = _unet_catalog(refresh=True).get(name)
-    if hit and hit != spec["unet"]:
+        cat = _unet_catalog(refresh=True)  # 直前に落としたものかもしれない
+        hit = cat.get(name) or cat.get(os.path.basename(name))
+    if hit is None:
+        raise RuntimeError(
+            f"checkpoint '{name}' が comfy から見えません。"
+            f"models/Stable-diffusion 配下にあるか、civitdl の取得が完了しているか"
+            f"確認してください。")
+    if hit != spec["unet"]:
         _log(f"unet override: {spec['unet']} -> {hit} (クライアント指定)")
-        return hit
-    return spec["unet"]
+    return hit
 
 
 _lora_index = None
@@ -288,21 +298,48 @@ def _map_sampler_pair(raw, sched_raw, def_sampler, def_scheduler):
 
     加えて comfy の生のサンプラー名(`res_multistep` など)もそのまま通す。
     A1111 に対応名が無いサンプラーを指定する手段がこれしかないため。
+    `"res_multistep simple"` のように comfy 名 + scheduler を1つの文字列にした形も
+    同様に受ける(A1111 の `"DPM++ 2M Karras"` と同じ書き方)。
     """
     key = str(raw or "").strip().lower()
     samplers, schedulers = _comfy_sampler_names()
-    if key in samplers:
+
+    def _sched(name):
+        """scheduler 名を comfy 名へ。解決できなければ None。"""
+        k = str(name or "").strip().lower()
+        return k if k in schedulers else SCHEDULER_MAP.get(k)
+
+    if not key:
+        sampler, scheduler = def_sampler, def_scheduler
+    elif key in samplers:
         sampler, scheduler = key, def_scheduler
+    elif key in SAMPLER_MAP:
+        sampler, scheduler = SAMPLER_MAP[key]
     else:
-        sampler, scheduler = SAMPLER_MAP.get(key, (def_sampler, def_scheduler))
-    if sched_raw:
-        sched_key = str(sched_raw).strip().lower()
-        if sched_key in schedulers:
-            scheduler = sched_key
+        # "res_multistep simple" のようにサンプラー名と scheduler を1つの文字列で
+        # 送ってくる形も受ける。A1111 の "DPM++ 2M Karras" と同じ書き方で、
+        # SAMPLER_MAP に列挙済みの組み合わせ以外にも適用できるようにする。
+        head, _, tail = key.rpartition(" ")
+        tail_sched = _sched(tail) if head else None
+        if tail_sched and (head in samplers or head in SAMPLER_MAP):
+            sampler = head if head in samplers else SAMPLER_MAP[head][0]
+            scheduler = tail_sched
         else:
-            mapped = SCHEDULER_MAP.get(sched_key)
-            if mapped:
-                scheduler = mapped
+            # 解決できない名前を既定へ落とすと、指定と違う値で生成されたことに
+            # クライアントは気づけない(parameters には送信値が返るため)。
+            # hr_upscaler と同じくエラーにする。
+            raise RuntimeError(
+                f"sampler={raw!r} を解決できません。"
+                f"A1111 名: {', '.join(sorted(SAMPLER_MAP))} / "
+                f"comfy 名: {', '.join(sorted(samplers))}")
+    if sched_raw:
+        resolved = _sched(sched_raw)
+        if resolved is None:
+            raise RuntimeError(
+                f"scheduler={sched_raw!r} を解決できません。"
+                f"A1111 名: {', '.join(sorted(SCHEDULER_MAP))} / "
+                f"comfy 名: {', '.join(sorted(schedulers))}")
+        scheduler = resolved
     return sampler, scheduler
 
 
@@ -312,91 +349,16 @@ def _map_sampler(req, spec):
         getattr(req, "scheduler", None), spec["sampler"], spec["scheduler"])
 
 
-# 蒸留前(RAW)バリアントの検出用。camelCase の境界に区切りを入れてから
-# トークン単位で "raw" を探す。正規表現の lookaround に IGNORECASE を効かせると
-# `[a-z]` が大文字にもマッチしてしまい `krea2RawInt8` を取りこぼす。
-# RAW に turbo 向けの値が来たと判断する閾値。RAW の適正は目安 20〜30 step /
-# cfg 3.5〜5 なので、そこから明確に外れた値だけを弾く(正常な RAW 利用を巻き込まない)。
-RAW_MIN_STEPS = 10
-RAW_MIN_CFG = 1.5
+def _sampling(req, spec):
+    """steps / cfg を決める。値の決定はクライアントの責任。
 
-_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
-
-
-def _is_raw_variant(unet_name):
-    """蒸留前の RAW モデルかどうか。
-
-    Civitai の画像が申告する Checkpoint リソースが RAW バリアントを指していることが
-    あり(モデル名に "Turbo" と入っていてもバージョンが raw のことがある)、クライアントは
-    それをそのまま civitdl する。RAW を turbo 前提の steps=8 / cfg=1 で回すと絵にならない。
-    例外も出ず parameters と info も整合するのでサイレントに壊れる。ここで検出して
-    steps/cfg の矯正を止める。
-    """
-    base = os.path.basename(unet_name or "")
-    tokens = _SPLIT_RE.split(_CAMEL_RE.sub("_", base).lower())
-    return "raw" in tokens
-
-
-def _normalize_sampling(req, spec, is_raw=False):
-    """turbo(蒸留)モデル向けに steps/cfg を正規化する。
-
-    クライアントは SDXL 向けの既定値(steps=20, cfg_scale=7)を送ってくるが、
-    Krea2 Turbo / Z-Image Turbo は cfg=1 で蒸留されており、cfg>1 では絵が破綻する。
-    steps も 8 前後を前提に蒸留されている。ここで spec 値へ寄せ、黙って値を
-    書き換えたことがログに残るようにする(info にも実際に使った値を返す)。
+    ルーターはモデルの中身(蒸留の有無、蒸留時の cfg、推奨 step 数)を知らない。
+    こちらで推奨値を定義すると、想定と違う使い方をクライアントができなくなる。
+    未送信のときだけ spec の値へ落ちる。
     """
     req_steps = int(getattr(req, "steps", 0) or 0)
     req_cfg = float(getattr(req, "cfg_scale", 0) or 0)
-    if is_raw:
-        # RAW は蒸留を経ていないので turbo 用の spec 値を当ててはいけない。
-        # 送信値をそのまま使う(クライアントが RAW 向けの値を送る前提)。
-        steps, cfg = (req_steps or spec["steps"]), (req_cfg or spec["cfg"])
-        # ただし turbo 向けの値がそのまま来た場合は生成しても絵にならない。
-        # クライアントは Civitai 画像のメタから steps/cfg を取るため、turbo 画像が
-        # RAW バリアントを申告していると必ずこの組み合わせになる。矯正しても
-        # 送信値を使っても壊れるので、**黙って壊れた画像を返さずエラーで落とす**。
-        # 未送信(0)は判定対象外。送られた値だけを見る。
-        if (req_steps and req_steps <= RAW_MIN_STEPS) or \
-                (req_cfg and req_cfg <= RAW_MIN_CFG):
-            raise RuntimeError(
-                f"RAW variant '{spec['name']}' に turbo 向けのパラメータが指定されました "
-                f"(steps={req_steps}, cfg_scale={req_cfg})。"
-                f"RAW は蒸留前のモデルで {RAW_MIN_STEPS + 1} step / cfg {RAW_MIN_CFG} 超"
-                f"(目安 20〜30 step / cfg 3.5〜5)を想定しています。"
-                f"この値のままでは絵になりません。turbo バリアントの checkpoint を"
-                f"指定するか、RAW 向けの steps / cfg_scale を指定してください。")
-        _log(f"RAW variant detected: steps/cfg は矯正せず送信値を使う "
-             f"(steps={steps} cfg={cfg})")
-        return steps, cfg
-    # 送信値をそのまま使う。値の決定はクライアントの責任で、ルーターは書き換えない
-    # (書き換えると EXIF に送っていない値が残り、クライアントから制御もできない)。
-    steps = req_steps or spec["steps"]
-    cfg = req_cfg if req_cfg else spec["cfg"]
-    if abs(cfg - spec["cfg"]) > 1e-6:
-        _log(f"WARN: cfg={cfg} は cfg={spec['cfg']} で蒸留されたモデルには不適合。"
-             f"送信値のまま使用する。")
-    return steps, cfg
-
-
-# 8step 蒸留モデルで実用になることを確認したサンプラー。ここから外れると
-# 顔が潰れるなどの破綻が起きる(dpmpp_2m+karras で目が黒い塊になるのを実測)。
-TURBO_SAFE_SAMPLERS = {"euler", "euler_ancestral", "res_multistep", "er_sde", "lcm"}
-
-
-def _normalize_sampler(sampler, scheduler, spec):
-    """蒸留モデルに不適合なサンプラーを spec 値へ矯正する。
-
-    クライアントは SDXL 向けに `sampler_index: "DPM++ 2M Karras"` を送ってくるが、
-    8step 蒸留モデルではこれで顔が完全に潰れる。steps / cfg と同様、互換性は
-    こちら側で吸収する(クライアントに分岐を実装させない)。
-    turbo で実用になることを確認済みのサンプラーが明示された場合はそれを尊重する。
-    """
-    if sampler not in TURBO_SAFE_SAMPLERS:
-        _log(f"WARN: sampler {sampler}/{scheduler} は 8step 蒸留モデルで破綻する "
-             f"(安全リスト: {', '.join(sorted(TURBO_SAFE_SAMPLERS))})。"
-             f"送信値のまま使用する。")
-    return sampler, scheduler
+    return (req_steps or spec["steps"]), (req_cfg or spec["cfg"])
 
 
 def _warn_unsupported(req, spec):
@@ -405,16 +367,6 @@ def _warn_unsupported(req, spec):
     if ov.get("sd_vae"):
         _log(f"NOTE: override_settings.sd_vae={ov['sd_vae']!r} は無視される "
              f"(comfy 側は {spec['vae']} 固定)")
-    if bool(getattr(req, "enable_hr", False)):
-        unused = [k for k in ("hr_upscaler", "hr_second_pass_steps", "hr_sampler_name",
-                              "hr_scheduler", "denoising_strength")
-                  if getattr(req, k, None) not in (None, "", 0)]
-        if unused:
-            _log(f"NOTE: {', '.join(unused)} は使われない "
-                 f"(HR の 2nd パス設定は spec の内部固定値を使うため)")
-    if getattr(req, "hr_cfg", None) not in (None, "") and float(getattr(req, "hr_cfg", 1) or 1) != 1.0:
-        _log(f"NOTE: hr_cfg={getattr(req, 'hr_cfg')} は無視される "
-             f"(蒸留モデルは cfg=1 前提)")
     for unit in _adetailer_units(req):
         if unit.get("ad_controlnet_model") not in (None, "None", ""):
             _log("NOTE: ad_controlnet_* は Krea2/Z-Image 用 ControlNet が無いため無視")
@@ -455,16 +407,62 @@ def _free_forge_vram():
 
 def _free_comfy_vram():
     """comfy は生成後もモデルを VRAM に保持し続けるため、明示的に解放させる。
-    これを怠ると次の forge ジョブがロードに失敗する(実測 8GB 保持)。"""
+    これを怠ると次の forge ジョブがロードに失敗する(実測 8GB 保持)。
+
+    **free_memory は送らない。** comfy の /api/free は2つのフラグで効果が別物で
+    (main.py の flags 処理)、unload_models は unload_all_models() を呼んで VRAM だけ
+    返すのに対し、free_memory は execution の reset() でノード出力キャッシュを作り直す。
+    後者を送るとロード済みモデルのオブジェクトごと捨てられ、次の生成が必ずディスクから
+    読み直しになる(実測: 連続生成でも毎回フルロード)。VRAM を返す目的には前者で足りる。
+    """
     try:
         req = urllib.request.Request(
             COMFY_URL + "/api/free",
-            data=json.dumps({"unload_models": True, "free_memory": True}).encode(),
+            data=json.dumps({"unload_models": True}).encode(),
             headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=120).read()
         _log("comfy VRAM released")
     except Exception as e:
         _log(f"WARN: comfy VRAM release failed: {e!r}")
+
+
+# comfy が VRAM を握ったままかどうか。生成のたびに解放すると comfy の
+# DynamicVRAM がステージした重み(実測 11.7GB)まで捨てられ、次の生成が必ず
+# ディスクからの読み直しになる(実測 +98秒)。そこで解放は forge が実際に
+# VRAM を要求するまで遅らせる。
+_comfy_holds_vram = False
+_lazy_release_installed = False
+
+
+def _release_comfy_if_held():
+    global _comfy_holds_vram
+    if not _comfy_holds_vram:
+        return
+    _comfy_holds_vram = False
+    _free_comfy_vram()
+
+
+def _install_lazy_release():
+    """forge が VRAM へモデルを載せる直前に comfy を解放させる。
+
+    load_models_gpu は forge が GPU を使う唯一の入口(load_model_gpu もここを
+    通る)なので、txt2img 以外の経路(img2img など)も漏れなく拾える。
+    フックできなかった場合は従来どおり生成ごとに即解放する(下の finally 参照)。
+    """
+    global _lazy_release_installed
+    try:
+        from backend import memory_management
+        original = memory_management.load_models_gpu
+
+        def patched(*a, **kw):
+            _release_comfy_if_held()
+            return original(*a, **kw)
+
+        memory_management.load_models_gpu = patched
+        _lazy_release_installed = True
+        _log("lazy comfy VRAM release installed (hook: load_models_gpu)")
+    except Exception as e:
+        _log(f"WARN: lazy release hook failed; falling back to eager free: {e!r}")
 
 
 def _build_txt2img(spec, prompt, neg, w, h, steps, cfg, seed, batch,
@@ -488,21 +486,29 @@ def _build_txt2img(spec, prompt, neg, w, h, steps, cfg, seed, batch,
     image_out = ["8", 0]
 
     if hr2pass:
-        g["40"] = {"class_type": "UpscaleModelLoader",
-                   "inputs": {"model_name": hr2pass["model"]}}
-        g["41"] = {"class_type": "ImageUpscaleWithModel",
-                   "inputs": {"upscale_model": ["40", 0], "image": ["8", 0]}}
-        # ESRGAN は 4x なので、目標倍率へ縮小して合わせる
-        g["42"] = {"class_type": "ImageScaleBy",
-                   "inputs": {"image": ["41", 0], "upscale_method": "lanczos",
-                              "scale_by": hr2pass["shrink"]}}
+        tw, th = hr2pass["target"]
+        if hr2pass["kind"] == "model":
+            # モデル拡大は倍率が固定(4x など)なので、目標解像度へ縮小して合わせる
+            g["40"] = {"class_type": "UpscaleModelLoader",
+                       "inputs": {"model_name": hr2pass["model"]}}
+            g["41"] = {"class_type": "ImageUpscaleWithModel",
+                       "inputs": {"upscale_model": ["40", 0], "image": ["8", 0]}}
+            g["42"] = {"class_type": "ImageScale",
+                       "inputs": {"image": ["41", 0], "upscale_method": "lanczos",
+                                  "width": tw, "height": th, "crop": "disabled"}}
+        else:
+            # 単純リサイズ(Lanczos など)。モデルを経由しない
+            g["42"] = {"class_type": "ImageScale",
+                       "inputs": {"image": ["8", 0],
+                                  "upscale_method": hr2pass["model"],
+                                  "width": tw, "height": th, "crop": "disabled"}}
         g["43"] = {"class_type": "VAEEncode",
                    "inputs": {"pixels": ["42", 0], "vae": ["12", 0]}}
         g["44"] = {"class_type": "KSampler",
                    "inputs": {"model": model_out, "seed": seed,
-                              "steps": hr2pass["steps"], "cfg": cfg,
-                              "sampler_name": spec["hr_sampler"],
-                              "scheduler": spec["hr_scheduler"],
+                              "steps": hr2pass["steps"], "cfg": hr2pass["cfg"],
+                              "sampler_name": hr2pass["sampler"],
+                              "scheduler": hr2pass["scheduler"],
                               "positive": ["6", 0], "negative": ["13", 0],
                               "latent_image": ["43", 0],
                               "denoise": hr2pass["denoise"]}}
@@ -713,6 +719,90 @@ def _build_inpaint(spec, image_name, mask_name, prompt, neg, steps, cfg, seed,
 
 # ---------------------------------------------------------------- HR (hires fix)
 
+# A1111 のアップスケーラ名のうち、モデルを使わない単純リサイズのもの。
+# comfy の ImageScale の upscale_method へ写す。
+PIXEL_UPSCALERS = {
+    "lanczos": "lanczos", "nearest": "nearest-exact", "nearest-exact": "nearest-exact",
+    "bilinear": "bilinear", "bicubic": "bicubic", "area": "area",
+    # Latent 系は latent 空間での拡大だが、ここでは同等の画素拡大で代替する
+    # (VAE 往復を挟む都合上、latent のまま引き渡す経路が無い)。
+    "latent": "bilinear", "latent (bicubic)": "bicubic",
+    "latent (nearest)": "nearest-exact", "latent (nearest-exact)": "nearest-exact",
+}
+
+
+def _resolve_upscaler(name, spec):
+    """hr_upscaler を「単純リサイズ」か「モデル拡大」に解決する。
+
+    値の良し悪しはクライアントが決める。Lanczos は Z-Image で破綻すると実測して
+    いるが、指定されたらそのまま使う(ルーターが good/bad を判断しない)。
+    解決できない名前は黙って spec 既定に落とさずエラーにする。
+    """
+    if not name:
+        return ("model", spec["hr_upscale_model"])
+    key = str(name).strip()
+    if key.lower() in PIXEL_UPSCALERS:
+        return ("pixel", PIXEL_UPSCALERS[key.lower()])
+    catalog = _upscale_catalog()
+    for cand in catalog:
+        if cand.lower() == key.lower() or os.path.splitext(cand)[0].lower() == key.lower():
+            return ("model", cand)
+    raise RuntimeError(
+        f"hr_upscaler={name!r} を解決できません。"
+        f"単純リサイズ: {', '.join(sorted(PIXEL_UPSCALERS))} / "
+        f"モデル: {', '.join(catalog) if catalog else '(なし)'}")
+
+
+_UPSCALE_CATALOG = None
+
+
+def _upscale_catalog():
+    global _UPSCALE_CATALOG
+    if _UPSCALE_CATALOG is None:
+        try:
+            _UPSCALE_CATALOG = json.loads(urllib.request.urlopen(
+                COMFY_URL + "/api/models/upscale_models", timeout=30).read())
+        except Exception as e:
+            _log(f"WARN: upscale model catalog fetch failed: {e}")
+            _UPSCALE_CATALOG = []
+    return _UPSCALE_CATALOG
+
+
+def _hr2pass(req, spec, hr):
+    """HR の 2nd パス設定を解決する。値はクライアントのもの。
+
+    `hr_upscaler` / `hr_sampler_name` / `hr_scheduler` / `hr_second_pass_steps` /
+    `hr_cfg` は未送信(None / 空 / 0)なら spec の既定へ落ちる。**`denoising_strength`
+    だけは別で、forge の API モデルが既定 0.75 を必ず埋めるため spec["hr_denoise"] には
+    落ちない。**ネイティブ forge も同じ 0.75 で焼き直すので、これで挙動が揃う。
+
+    hr_cfg は forge でも「HR パスの cfg 実値」であって 1パス目からの継承ではない
+    (processing.py の `if self.hr_cfg == 1: self.hr_uc = None`)。
+    """
+    kind, up = _resolve_upscaler(getattr(req, "hr_upscaler", None), spec)
+    den = getattr(req, "denoising_strength", None)
+    steps = int(getattr(req, "hr_second_pass_steps", 0) or 0)
+    sampler, scheduler = _map_sampler_pair(
+        getattr(req, "hr_sampler_name", None), getattr(req, "hr_scheduler", None),
+        spec["hr_sampler"], spec["hr_scheduler"])
+    cfg = getattr(req, "hr_cfg", None)
+    hr2pass = {"kind": kind, "model": up, "target": (hr["w"], hr["h"]),
+               "denoise": float(den) if den is not None else spec["hr_denoise"],
+               "steps": steps or spec["hr_steps"],
+               "cfg": float(cfg) if cfg not in (None, "") else spec["cfg"],
+               "sampler": sampler, "scheduler": scheduler}
+    _log(f"  hr 2nd pass: {kind}={up} sampler={sampler}/{scheduler} "
+         f"steps={hr2pass['steps']} cfg={hr2pass['cfg']} denoise={hr2pass['denoise']}")
+    return hr2pass
+
+
+def _hr2pass_steps(hr2pass):
+    """2nd パスが実際に回すサンプリングステップ数(進捗の見積もり用)。"""
+    if not hr2pass:
+        return 0
+    return int(hr2pass["steps"] * hr2pass["denoise"]) + 1
+
+
 def _hr_params(req, spec, base_w, base_h, base_steps):
     """enable_hr を目標解像度へ翻訳する。実際の実現方式は spec の hr_mode 次第。
 
@@ -732,8 +822,9 @@ def _hr_params(req, spec, base_w, base_h, base_steps):
     速度も 2パスが速かったため esrgan_2pass に統一した。上表の「2パスは破綻する」は
     Lanczos / bislerp 拡大に限った話で、ESRGAN 拡大には当てはまらない。
 
-    denoising_strength / hr_upscaler / hr_second_pass_steps は、クライアントから
-    合わせにいけない内部固定値なので使わない(値は parameters にエコーバックする)。
+    **2nd パスの値はクライアントのもの**(解決は _hr2pass)。denoising_strength /
+    hr_second_pass_steps / hr_sampler_name / hr_scheduler / hr_upscaler / hr_cfg は
+    送信値をそのまま使う。
     """
     if not bool(getattr(req, "enable_hr", False)):
         return None
@@ -803,8 +894,11 @@ def _detect(unit, pil):
     name = unit.get("ad_model")
     path = models.get(name)
     if path is None:
-        _log(f"WARN: ADetailer model {name!r} not found; unit skipped")
-        return []
+        # 黙ってスキップすると ADetailer が効いていないことに気づけない。
+        raise RuntimeError(
+            f"ADetailer model {name!r} が見つかりません。"
+            f"models/adetailer 配下にあるか確認してください。"
+            f"利用可能: {', '.join(sorted(models)) if models else '(なし)'}")
 
     pred = ultralytics_predict(
         path, pil,
@@ -989,9 +1083,7 @@ def _generate(req):
     unet = _resolve_unet(spec, model)
     # RAW 判定は実際にロードするファイル名で行う。振り分けキー(checkpoint 名)は
     # モデル名由来で "Turbo" と入っていても中身が RAW のことがあるため。
-    is_raw = _is_raw_variant(unet)
-
-    steps, cfg = _normalize_sampling(req, spec, is_raw=is_raw)
+    steps, cfg = _sampling(req, spec)
     # 16px 丸めは latent の実装都合であってクライアントが知るべきことではない。
     # 丸めた解像度で生成し、最後に要求解像度へ戻す(I/F として入出力を整合させる)。
     req_w = int(getattr(req, "width", 1024) or 1024)
@@ -1010,15 +1102,27 @@ def _generate(req):
     sampler, scheduler = _map_sampler(req, spec)
 
     _warn_unsupported(req, spec)
-    sampler, scheduler = _normalize_sampler(sampler, scheduler, spec)
     hr = _hr_params(req, spec, w, h, steps)
     units = _adetailer_units(req)
 
+    # HR の実現方法はモデルごとに違う(実測で決めた。詳細は _hr_params の docstring)。
+    #   direct       : 目標解像度で1パス生成
+    #   esrgan_2pass : base 生成 -> 拡大 -> 低 denoise で焼き直し
+    # 現状は Krea2 / Z-Image とも esrgan_2pass。Krea2 は direct でも破綻しないが、
+    # 同一シードで比較して画質に有意差が無く速度も 2パスがわずかに速かったため統一した。
+    # 進捗の総ステップ数を出すのに要るので、グラフ組み立てより先に解決しておく。
+    # 名前の解決に失敗した場合もここで落ちる(st.begin より前なので job を掴まない)。
+    gw, gh = w, h
+    hr2pass = None
+    if hr:
+        if spec.get("hr_mode") == "esrgan_2pass":
+            hr2pass = _hr2pass(req, spec, hr)
+        else:
+            gw, gh = hr["w"], hr["h"]
+
     # 進捗の総ステップ数。ADetailer は検出数が事前に分からないので 1領域/ユニットで
     # 見積もっておき、実際に増えたぶんは _submit_and_wait 側で max を押し上げる。
-    total = steps + sum(spec["steps"] for _ in units)
-    if hr and spec.get("hr_mode") == "esrgan_2pass":
-        total += int(spec["hr_steps"] * spec["hr_denoise"]) + 1
+    total = steps + sum(spec["steps"] for _ in units) + _hr2pass_steps(hr2pass)
 
     _wait_forge_idle()
 
@@ -1041,23 +1145,6 @@ def _generate(req):
     offset = 0
 
     # --- 生成 ---
-    # HR の実現方法はモデルごとに違う(実測で決めた。詳細は _hr_params の docstring)。
-    #   direct       : 目標解像度で1パス生成
-    #   esrgan_2pass : base 生成 -> ESRGAN 拡大 -> 低 denoise で焼き直し
-    # 現状は Krea2 / Z-Image とも esrgan_2pass。Krea2 は direct でも破綻しないが、
-    # 同一シードで比較して画質に有意差が無く速度も 2パスがわずかに速かったため統一した。
-    gw, gh = w, h
-    hr2pass = None
-    if hr:
-        if spec.get("hr_mode") == "esrgan_2pass":
-            # ESRGAN は 4x 固定なので、目標倍率になるよう縮小率を逆算する
-            hr2pass = {"model": spec["hr_upscale_model"],
-                       "shrink": hr["scale"] / 4.0,
-                       "denoise": spec["hr_denoise"],
-                       "steps": spec["hr_steps"]}
-        else:
-            gw, gh = hr["w"], hr["h"]
-
     graph = _build_txt2img(spec, prompt, neg, gw, gh, steps, cfg, seed, batch,
                            sampler, scheduler, loras, hr2pass=hr2pass, unet=unet)
     # 進捗はサンプラーノードだけを対象にする("3"=base, "44"=HR の 2nd パス)
@@ -1066,7 +1153,7 @@ def _generate(req):
         node_offsets["44"] = steps
     images = _open_outputs(_submit_and_wait(graph, st, step_offset=offset,
                                             node_offsets=node_offsets))
-    offset += steps + (int(hr2pass["steps"] * hr2pass["denoise"]) + 1 if hr2pass else 0)
+    offset += steps + _hr2pass_steps(hr2pass)
     # 実出力の解像度(HR 有効時は 2 パス目の結果)。ログにのみ使う。
     # parameters / info / infotext は入力解像度(gw, gh)を返す(A1111 準拠)。
     out_w, out_h = images[0].width, images[0].height
@@ -1106,15 +1193,16 @@ def _generate(req):
                   for im in images]
         _log(f"  resolution restore: {w}x{h} -> {req_w}x{req_h} 相当へリサイズ")
 
-    extra = {"Backend": f"comfy/{spec['name']}-raw" if is_raw
-             else f"comfy/{spec['name']}"}
+    extra = {"Backend": f"comfy/{spec['name']}"}
     if hr:
         extra.update({"Hires upscale": hr["scale"],
                       "Hires mode": spec.get("hr_mode", "direct")})
-        if spec.get("hr_mode") == "esrgan_2pass":
-            extra.update({"Hires upscaler": spec["hr_upscale_model"],
-                          "Hires steps": spec["hr_steps"],
-                          "Denoising strength": spec["hr_denoise"]})
+        if hr2pass:
+            extra.update({"Hires upscaler": hr2pass["model"],
+                          "Hires sampler": f"{hr2pass['sampler']}/{hr2pass['scheduler']}",
+                          "Hires CFG Scale": hr2pass["cfg"],
+                          "Hires steps": hr2pass["steps"],
+                          "Denoising strength": hr2pass["denoise"]})
     if ad_used:
         extra["ADetailer model"] = ", ".join(m for m in ad_used if m)
     if loras:
@@ -1147,10 +1235,9 @@ def _generate(req):
                          .get("CLIP_stop_at_last_layers", 1) or 0),
         "is_using_inpainting_conditioning": False, "version": "forge-comfy-router",
     }
-    # `parameters` は送信リクエストのエコーバックだが、こちらは turbo 向けに
-    # steps/cfg/sampler を矯正し解像度も丸めている。送信値のまま返すと、クライアントが
-    # これを EXIF に保存して group_hash の計算元にしているため、保存メタが実際の生成条件と
-    # 食い違い、同一条件の画像がハッシュ違いで別グループに割れる。
+    # `parameters` は送信リクエストのエコーバック。クライアントはこれを EXIF に保存し
+    # group_hash の計算元にするため、実際の生成条件と食い違うと同一条件の画像が
+    # ハッシュ違いで別グループに割れる。書き換えないので食い違いは起きない。
     #
     # ただし**クライアントが送っていないキーは埋めない**。ネイティブ forge は送られた
     # ものだけを返し、未送信の任意フィールドは null のままにする。埋めてしまうと、
@@ -1164,8 +1251,8 @@ def _generate(req):
     # 制御する手段も無くなる。したがって params は送信値そのまま(dict(raw))。
     #
     #   生成に使う値(steps / cfg_scale / sampler / scheduler)-> 送信値をそのまま使う
-    #   HR の 2nd パス設定(denoising_strength / hr_* )-> 無視するが送信値を返す
-    #     実際に使った内部値は info.extra_generation_params に載せる
+    #   HR の 2nd パス設定(denoising_strength / hr_upscaler / hr_sampler_name /
+    #     hr_scheduler / hr_second_pass_steps / hr_cfg)-> 送信値をそのまま使う
     #   width / height -> 16px 丸めは内部で吸収し、要求解像度を返す
     # A1111 は hires 有効時も `parameters` / infotext の Size は 1 パス目の解像度を保ち、
     # 倍率は `Hires upscale` で別に持つ(実ファイルだけが 2 倍になる)。
@@ -1205,9 +1292,15 @@ def _wrap_txt2img(app: FastAPI):
             _log(f"ERROR: {e!r}")
             raise
         finally:
-            # 成否によらず comfy に VRAM を返させる。ここを飛ばすと次の forge ジョブが
-            # ロードに失敗するため、例外経路でも必ず通す。
-            _free_comfy_vram()
+            # 成否によらず comfy の VRAM を「解放予定」にする。実際の解放は forge が
+            # VRAM を要求した時点(_install_lazy_release のフック)。こうすると comfy の
+            # 連続生成でステージ済みの重みが残り、ディスク読み直しが起きない。
+            # フックを入れられなかった場合だけ従来どおり即解放する。
+            global _comfy_holds_vram
+            if _lazy_release_installed:
+                _comfy_holds_vram = True
+            else:
+                _free_comfy_vram()
             try:
                 shared.state.end()
                 shared.state.sampling_step = 0
@@ -1223,6 +1316,7 @@ def _wrap_txt2img(app: FastAPI):
 
 def on_app_started(demo: gr.Blocks, app: FastAPI):
     _wrap_txt2img(app)
+    _install_lazy_release()
 
 
 script_callbacks.on_app_started(on_app_started)

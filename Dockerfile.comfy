@@ -53,6 +53,28 @@ WORKDIR /app/comfy
 ENV COMFY_DATA=/data/comfy
 # Z-Image の HiRes で確保ピークが跳ねた件の対策(断片化の緩和)。
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# --cache-ram <active> <inactive>: ロード済みモデルを RAM に残す条件。
+# 方針は「1アーキだけ常駐させる」。連続生成でディスクを読み直さないのが目的で、
+# 複数アーキの同時常駐は狙わない(RAM が足りない。下記の収支を参照)。
+#
+# 既定のままだと1つも残らない。inactive 側の既定が「全 RAM 量」= 到達不可能な
+# 目標のため、毎ノード実行後に未使用エントリの追い出しが必ず走る。前回使った
+# モデルは次のプロンプト開始時点では未 fetch = inactive 扱いなので、ローダより
+# 先に別のノードが実行されると捨てられ得る。空きが inactive 値を上回る間は
+# 何も捨てないので、到達可能な値を明示する。
+#
+# 値は「1アーキ常駐時の空き」と「2アーキ常駐時の空き」の間に置く。
+# 実測(全 62.7GiB): forge 16.4GiB(sd_checkpoints_keep_in_cpu で CPU 常駐) +
+# comfy ベース ~4GiB + 1アーキ ~17GiB。
+#   1アーキ = 38.0GiB 使用 -> 空き 24.7GiB   (閾値を上回るので残す)
+#   2アーキ = 55.2GiB 使用 -> 空き  7.5GiB   (下回るので古い方を落とす)
+# 逼迫時は既定と同じ挙動へ縮退するだけで壊れない。
+# active 側は OOM を避けるハード下限(既定は RAM の10%)。
+#
+# 参考: --disable-mmap は試して効果が無かった(200.2s -> 203.6s)。重みの読み直しは
+# mmap の問題ではなく、生成ごとに /api/free で DynamicVRAM のステージを捨てて
+# いたのが原因だった。解放の遅延はルーター側(_install_lazy_release)で対処する。
 EXPOSE 8188
 
 CMD ["sh", "-c", "\
@@ -65,4 +87,5 @@ CMD ["sh", "-c", "\
         --temp-directory $COMFY_DATA/temp \
         --user-directory $COMFY_DATA/user \
         --database-url sqlite:///$COMFY_DATA/user/comfyui.db \
+        --cache-ram 6 16 \
 "]

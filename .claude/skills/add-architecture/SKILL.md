@@ -1,6 +1,6 @@
 ---
 name: add-architecture
-description: Add support for a NEW model architecture (like Krea 2 or Z-Image) that forge cannot load, by routing it to the ComfyUI backend. Use when the user wants to 導入 / 対応させる / 使えるようにする a new arch, when a checkpoint fails with "unknown model type", or when a newly-supported arch produces broken images. Covers the router internals and where to edit, extracting correct workflow values from official templates, the sampler/resolution traps, and the compatibility checklist against the client.
+description: Add support for a NEW model architecture (like Krea 2 or Z-Image) that forge cannot load, by routing it to the ComfyUI backend. Use when the user wants to 導入 / 対応させる / 使えるようにする a new arch, when a checkpoint fails with "unknown model type", or when a newly-supported arch produces broken images. Covers the router internals and where to edit, extracting correct workflow values from official templates, the resolution and HR traps, where the router must stay out of the client's parameter choices, and the compatibility checklist against the client.
 ---
 
 # 新アーキの導入
@@ -31,18 +31,16 @@ ENTRYPOINT が起動のたびに `rm -rf` してから `/app/data/extensions/` �
 comfy_router.py
 ├── MODEL_SPECS[]              アーキごとの定義。★新アーキはここに1エントリ足す
 ├── SAMPLER_MAP / SCHEDULER_MAP  A1111 名 → comfy 名
-├── TURBO_SAFE_SAMPLERS        蒸留モデルで実用になるサンプラー
-├── RAW_MIN_STEPS / RAW_MIN_CFG  RAW に turbo 値が来たときのエラー閾値
 │
 ├── _pick_spec(req)            checkpoint 名 → spec（振り分け）
 ├── _resolve_unet(spec, name)  指定名を comfy の実ファイルへ解決
-│                              **見つからなければ黙って spec 既定にフォールバック**
-├── _is_raw_variant(name)      蒸留前バリアントの検出（ファイル名の "raw" トークン）
+│                              **解決できなければエラー（既定へ落とさない）**
+├── _map_sampler_pair()        サンプラー/スケジューラ名の解決。解決不能はエラー
 ├── _align(v, m=16)            解像度の丸め。**全アーキ一律16の倍数**
-├── _hr_params()               enable_hr → 目標解像度の算出
-├── _normalize_sampling()      steps/cfg（送信値のまま。RAW に turbo 値ならエラー）
-├── _normalize_sampler()       サンプラー（送信値のまま。安全リスト外は警告のみ）
+├── _hr_params() / _hr2pass()  enable_hr → 目標解像度と 2nd パス設定
+├── _sampling()                steps/cfg（送信値。未送信時のみ spec 既定）
 ├── _wait_forge_idle()         forge の生成中に VRAM を剥がさないためのガード
+├── _install_lazy_release()    forge の VRAM 要求時に comfy を解放するフック
 │
 ├── _loaders()                 UNET/CLIP/VAE + LoRA + ModelSampling
 ├── _build_txt2img()           base（hr2pass 指定で HR の 2nd パスも同グラフに）
@@ -64,12 +62,31 @@ client → /sdapi/queue/txt2img → sd-queue のワーカー
                               _generate()
                                     ↓ _free_forge_vram()
                               comfy /api/prompt → ws で進捗 → /api/history
-                                    ↓ finally: _free_comfy_vram()
+                                    ↓ finally: 解放予定にする(即解放はしない)
                               TextToImageResponse(images, parameters, info)
 ```
 
-GPU は単一キューで直列化される。**`finally` の `_free_comfy_vram()` を通さないと
-comfy が VRAM を保持し続け、次の forge ジョブが OOM で落ちる。**
+GPU は単一キューで直列化される。comfy は生成後もモデルを VRAM に保持し続けるので、
+**解放しないと次の forge ジョブが OOM で落ちる。**
+
+### ただし生成ごとに解放してはいけない
+
+**解放は forge が実際に VRAM を要求するまで遅らせる。** comfy 生成の `finally` で毎回
+解放すると、comfy がステージした重み(実測 12.5GB)ごと捨てられ、次の生成が必ず
+ディスクからの読み直しになる。**同じモデルの連続生成で1枚あたり 150秒の差が出た**
+(237s → 51s)。
+
+```python
+finally:
+    _comfy_holds_vram = True          # 解放予定にするだけ
+
+# forge が GPU にモデルを載せる唯一の入口をフックする
+memory_management.load_models_gpu = patched   # 中で _release_comfy_if_held()
+```
+
+`load_models_gpu` を選ぶのは、ルーターが包んでいない経路(img2img など)も通るため。
+txt2img の native 分岐に置くと取りこぼして OOM する。フックに失敗したら従来どおり
+即解放にフォールバックさせ、壊れる方向へ倒れないようにする。
 
 ---
 
@@ -84,17 +101,44 @@ comfy が VRAM を保持し続け、次の forge ジョブが OOM で落ちる�
 | | 担当 | 例 |
 |---|---|---|
 | **I/F**（リクエスト/レスポンスの形） | **ルーターが吸収する** | `parameters` のキー・型・null、`info` のキー、`sd_model_hash`、解像度の丸め、`n_iter`、interrupt |
-| **パラメータの値**（どう描くか） | **クライアントの責任** | steps / cfg_scale / sampler / scheduler / ad_prompt |
+| **パラメータの値**（どう描くか） | **クライアントの責任** | steps / cfg_scale / sampler / scheduler / ad_prompt / HR の 2nd パス（`denoising_strength` / `hr_upscaler` / `hr_sampler_name` / `hr_scheduler` / `hr_second_pass_steps` / `hr_cfg`） |
 
 I/F は**内部で何を経由してもよい。入出力が整合していればよい。**
 例: latent の16px制約は実装都合なのでクライアントは知らなくてよい。丸めた解像度で
 生成し、出力を要求解像度へ戻す。`1928` を送れば `1928` が返る。
 
 値は**書き換えない**。書き換えると EXIF に送っていない値が残り、クライアントから
-制御する手段も無くなる。不適合な値が来ても警告ログだけで通す。**破綻してよい。**
+制御する手段も無くなる。**spec の既定値は「送られてこなかったときに使う値」であって、
+送信値を上書きしてよい根拠ではない。**
 
-例外は RAW バリアントだけ。turbo 向けの値（`steps ≤ 10` または `cfg ≤ 1.5`）が来たら
-**エラーで落とす**。矯正しても送信値を使っても壊れるので、黙って壊れた画像を返さない。
+### 不適合な入力: 値域は通す、名前はエラー
+
+**この2つを混同しない。** 扱いが逆になる。
+
+| | 扱い |
+|---|---|
+| **値域**が不適合（名前は解決できるが、このモデルに合わない値） | **そのまま使う。破綻してよい** |
+| **名前**が解決できない（checkpoint / LoRA / サンプラー / スケジューラ / アップスケーラ / 付加処理のモデル） | **エラーで落とす** |
+
+値域が変なのは「クライアントがそう決めた」と解釈できる。名前は解釈しようがない。
+迷ったら **「これが起きたことをクライアントは検出できるか」** で決める。既定へ落とすと
+`parameters` には送信値が返るので検出できない。これがこのスキルの言う最悪の事態。
+
+### ルーターはモデルの中身を知らない
+
+**値域チェックは書かない。例外も作らない。** 蒸留の有無、蒸留時の cfg、推奨 step 数、
+どのサンプラーが破綻するか、バリアントごとの適正レンジ——**モデル固有の知識を
+ルーターに持たせない。**
+
+「この組み合わせは絶対に壊れるから落とす」は必ず失敗する。壊れる境界の判断はモデルの
+性質に依存し、その知識はすぐ古くなる。実際に、モデル名からバリアントを推測して
+steps/cfg のレンジで弾く実装を入れたところ、**正当な組み合わせを弾いてタスクを失敗させた**。
+
+同じ理由で、モデルの素性をファイル名から推測して挙動を変えることもしない
+（`info` のラベルに使うのも同じ。推測に基づく記録は嘘をつく）。
+
+推奨値はクライアント側が持つ。ルーターは**要求されたパラメータで生成することだけに
+注力する。**
 
 ## (2) `parameters` は送信値をそのまま返す
 
@@ -102,27 +146,27 @@ I/F は**内部で何を経由してもよい。入出力が整合していれ�
 
 - **送っていないキーは埋めない。** 埋めるとネイティブと差分が出る
   （`sampler_index` だけ送ったのに `sampler_name` まで埋まる、など）
-- HR の 2nd パスのように**内部固定で制御不能な値**は、無視したうえで送信値を返し、
-  実態は `info.extra_generation_params` に載せる
+- 実際に使った値は `info.extra_generation_params` にも載せる。ここは送信値のエコーでは
+  なく**実測の記録**なので、内部で解決した名前（`hr_upscaler` の実ファイル名など）を書く
 
 # 実装手順
 
-**手順5・7・8 は実測を伴うので、先に反映（手順9）が要る。** 線形には進まない。
+**手順5・6・7 は実測を伴うので、先に反映（手順8）が要る。** 線形には進まない。
 
 ```
 1〜4（調べて spec を書く）
    ↓
-9（反映）              ← まずテンプレート値のまま入れて動かす
+8（反映）              ← まずテンプレート値のまま入れて動かす
    ↓
-5・7・8（実測で較正） ←┐
+5・6・7（実測で較正） ←┐
    ↓                    │ 変更のたびに再反映
-9（反映）             ──┘
+8（反映）             ──┘
    ↓
 検証 → E2E
 ```
 
 生成は必ずキュー経由（`/sdapi/queue/txt2img`）で行うため、spec が反映されていないと
-実測そのものができない。手順4まで終えたら一度手順9へ飛ぶこと。
+実測そのものができない。手順4まで終えたら一度手順8へ飛ぶこと。
 
 ## 1. ComfyUI の対応を確認
 
@@ -218,10 +262,10 @@ civitdl 管理下と同じ場所に置き、compose のマウントを増やさ�
     "aura_shift": None,                            # or 3.0
     "sampler": "euler", "scheduler": "simple",
     "steps": 8, "cfg": 1.0,                        # turbo なら
-    "hr_mode": "esrgan_2pass",                     # 手順8 で決める
+    "hr_mode": "esrgan_2pass",                     # 手順7 で決める
     "hr_sampler": "dpmpp_2m_sde", "hr_scheduler": "beta", "hr_steps": 5,
-    # upscale_models 配下に実在すること。**4x モデル前提**（_generate が
-    # shrink = hr_scale / 4.0 で縮小率を逆算する）。2x を指定すると解像度がズレる
+    # upscale_models 配下に実在すること。倍率は問わない
+    # （拡大後に目標解像度へリサイズするので 2x でも 4x でも合う）
     "hr_upscale_model": "4x-UltraSharp.pth", "hr_denoise": 0.33,
 }
 ```
@@ -255,49 +299,39 @@ r"z[_\- ]?image"     # "z_image" "z-image" "zImage" のいずれにも
 grep -n 'spec\[' comfy/router/scripts/comfy_router.py
 ```
 
-## 5. サンプラーの安全性を確認
+**リクエストのフィールドと対になるキーなら、API 側の既定値を先に確認する。** forge の
+API モデルは多くのフィールドを既定値で埋めるため、「送られてこなかった」を `None` / `0`
+では判定できない。埋まるフィールドでは spec のフォールバックに到達せず、**spec を
+調整しても絵は変わらない。** 到達しないと分かったらフォールバックを消す。
 
-**最も事故りやすい。破綻したらまずここを疑う。**
-8step 蒸留モデルに `dpmpp_2m`+`karras` を当てると顔が完全に潰れる（目が黒い塊になる）。
-これを解像度や量子化の問題と誤診し、HR 方式の比較を丸ごとやり直した。
-
-### 調べ方
-
-同一プロンプト・同一シードで、**spec の既定 + 既存の安全リスト5種**を生成し、
-顔を等倍で見る（手順は「自分での検証」）。潰れなければ安全。
-
-```
-euler / euler_ancestral / res_multistep / er_sde / lcm
+```bash
+docker compose exec -T sdui grep -n '"key": "<field>"' /app/webui/modules/api/models.py
 ```
 
-comfy の生サンプラー名を `sampler_index` にそのまま渡せる（`_map_sampler_pair` が
-A1111 名で引けなければ comfy 名として素通しする）。A1111 に対応名の無い
-`res_multistep` などはこの形で指定する。
+## 5. spec の既定値を実測で決める
 
-安全リスト外のサンプラーも**そのまま使われる**（警告ログが出るだけ）。リストは
-「破綻しないと実測で確認できたもの」の記録であって、強制ではない。
+spec の `sampler` / `scheduler` / `steps` / `cfg` / `hr_*` は、**クライアントが送って
+こなかったときにだけ使う値**。生成の良し悪しをルーターが決める値ではない
+（設計判断(1)の「モデルの中身を知らない」を参照）。
 
-### TURBO_SAFE_SAMPLERS に足すときの注意
+同一プロンプト・同一シードで数種を生成して選ぶ（手順は「自分での検証」）。
+**テンプレートの値をそのまま持ち込まない。** step 数もモデルも前提が違うため、
+そのまま使うと破綻することがある。
 
-**この集合は全アーキ共通。** anima で安全なものを足すと、既存の Krea2 / Z-Image でも
-そのサンプラーが素通しになる。逆に anima では危険だが既存アーキで安全なものは外せない。
+送信値が必ず埋まるフィールドでは、この既定値には**到達しない**。手順4の
+「API 側の既定値を先に確認する」を必ず通すこと。
 
-アーキごとに分けたくなったら、集合を spec のキーへ移す（`_normalize_sampler` が
-`spec` を受け取っているので改修は局所で済む）。
+### サンプラー名の解決（これは I/F の話）
 
-## 6. RAW（蒸留前）バリアントの命名を確認
+`_map_sampler_pair` は comfy 名 → A1111 名の順に引き、どちらでも引けなければ末尾の
+トークンを scheduler として分割する（`"res_multistep simple"` → `res_multistep` +
+`simple`）。A1111 の `"DPM++ 2M Karras"` と同じ書き方で、comfy 名にも適用できるように
+してある。それでも解決できなければ**エラー**。
 
-`_is_raw_variant` は**ロードするファイル名を camelCase 分割して "raw" トークンを探す**
-だけ。`krea2RawInt8Convrot` は拾えるが、非蒸留バリアントが `base` / `full` / `pruned`
-などの命名だと**検出されない**。
+名前の形を吸収するのは I/F の仕事。**どのサンプラーが良いかの判断とは別**で、
+解決さえできればどんな組み合わせでもそのまま使う。
 
-検出されないと、RAW に turbo 用の steps/cfg が当たってもエラーにならず、
-**サイレントに壊れた画像が返る**（このスキルが最悪と位置づけている事態）。
-
-Civitai でバリアントの命名を確認し、"raw" 以外なら `_is_raw_variant` を拡張する。
-非蒸留バリアントが存在しないアーキなら対応不要。
-
-## 7. 解像度の制約を調べて実装する
+## 6. 解像度の制約を調べて実装する
 
 公式/コミュニティの情報で「上限画素数」と「寸法の倍数制約」を確認する。
 （Z-Image は総画素 1,048,576 が上限で32の倍数必須）
@@ -312,11 +346,14 @@ Civitai でバリアントの命名を確認し、"raw" 以外なら `_is_raw_va
 拡張する。該当箇所:
 
 ```python
-w = _align(int(getattr(req, "width", 1024) or 1024))
-h = _align(int(getattr(req, "height", 1024) or 1024))
+req_w = int(getattr(req, "width", 1024) or 1024)
+req_h = int(getattr(req, "height", 1024) or 1024)
+w, h = _align(req_w), _align(req_h)      # 生成は丸めた解像度で
+...
+if (w, h) != (req_w, req_h):             # 返す前に要求解像度へ戻す
 ```
 
-## 8. hr_mode を決める
+## 7. hr_mode を決める
 
 **表で機械的に決めず、実測で決める。**
 
@@ -326,21 +363,23 @@ h = _align(int(getattr(req, "height", 1024) or 1024))
 |---|---|
 | 画質が同等 | **`esrgan_2pass`**（方式が揃い spec の分岐が減る） |
 | `esrgan_2pass` が破綻する | `direct` |
-| `direct` が破綻する | `esrgan_2pass`（Z-Image がこれ。4Mpx で網目状に劣化する） |
+| `direct` が破綻する | `esrgan_2pass`（高解像度で網目状に劣化するアーキがある） |
 
-Krea 2 は 4Mpx を直接生成できるが、実測（direct 346.0s / esrgan_2pass 300.6s、画質に
-有意差なし）の結果 `esrgan_2pass` にしている。**「ネイティブに扱えるから direct」
-という判断はしていない。**
+**「ネイティブに高解像度を扱えるから direct」という決め方はしない。** 直接生成できる
+アーキでも、同一シードで比べて画質差が無く速度も 2パスが上、という結果が出ている。
 
 | `hr_mode` | 内容 |
 |---|---|
 | `direct` | 目標解像度で1パス |
 | `esrgan_2pass` | base → ESRGAN 拡大 → 低 denoise で焼き直し |
 
-**拡大は必ずモデル拡大(ESRGAN)を経由させる。** Lanczos だと情報の無いぼけた画像を
-渡すことになり鱗状の反復パターンが出る。latent の bislerp 拡大も破綻した。
+**spec の既定（`hr_upscale_model`）はモデル拡大(ESRGAN)にする。** Lanczos だと情報の
+無いぼけた画像を渡すことになり鱗状の反復パターンが出る。latent の bislerp 拡大も破綻した。
 
-## 9. 反映
+あくまで**既定値**であって、2nd パスの拡大方式・sampler・steps をクライアントが
+送ってきたらそのまま使う。
+
+## 8. 反映
 
 **ルーターはイメージ同梱なので、`restart` では反映されない。再ビルドとコンテナ再作成が要る。**
 手順は `forge-restart` スキル。**再起動前に他セッションへ一報**（切れ目を掴んだ瞬間に
@@ -447,7 +486,7 @@ for v in d['modelVersions']:
 - **2モデル × 3機能 = 6パターン**（アーキが増えたら増える）
 - **実データは Civitai が申告する設定をそのまま使う。** 手持ちモデルで代用しない
   （合成プロンプトの生成物を元画像に使って差し戻された。実データを流したからこそ
-  RAW バリアント混入という本番バグが見つかった）
+  本番バグが見つかった）
 - **短い示唆は最小の読みで受ける。** 拡大解釈して計画を作り替える前に、
   現在の全体マトリクスを再掲して合意を取る
 - **ダウンロードと生成を分離しない。** 通常の生成タスクの一部として civitdl が走る形で
@@ -505,7 +544,8 @@ SDXL 等は従来経路のままです。
 
 ## 確認をお願いしたいこと
 1. ネイティブ SDXL とのキー単位の機械照合(parameters / info のキー数・型・null)
-2. クライアント無改修のまま、実際のプロンプト・LoRA・ADetailer 設定で生成
+2. **I/F 側は無改修のまま**、実際のプロンプト・LoRA・ADetailer 設定で生成
+   （生成パラメータの推奨値はそちらで定義してください。ルーターは書き換えません）
 3. **下記の Civitai 画像を、通常の画像サンプリング経路(img2param)で流してください**
    <arch>: <Civitai 画像 URL>（LoRA 付きのものを選ぶ）
    HR あり / なしの両方でお願いします
@@ -527,7 +567,8 @@ HR は base の単純拡大との差、という形で局在性まで見てい�
   複数プロセスから同時に要求すると固まります（並列生成が同じ新規モデルを指すと発生）
 - ダウンロードの進捗は /civitdl/status ではなく .tmp のサイズで見てください。
   ダウンロード中に /status が応答しないのは正常です
-- 大きなモデルのロード自体でディスクが飽和します(生成1本で %util 96%)
+- モデルの初回ロードでディスクが飽和します(1アーキ 17GiB 前後)。同じモデルの連続生成
+  なら RAM に残るので発生しませんが、モデルを切り替えるたびに1回かかります
 - group_hash の予測基底は実際の保存 meta と同じ構造(59キー)にしてください
 
 ## 使えるバリアント
@@ -538,7 +579,7 @@ HR は base の単純拡大との差、という形で局在性まで見てい�
 
 **アーキごとに1枚、LoRA が付いている画像**を選ぶ。Civitai の画像ページが申告する
 リソース（checkpoint / LoRA）をクライアントがそのまま civitdl するので、**実データでしか
-出ない問題**（RAW バリアントの申告、アーキ違いの LoRA、極端な生成パラメータ）を拾える。
+出ない問題**（想定外のバリアント名、アーキ違いの LoRA、極端な生成パラメータ）を拾える。
 
 ```bash
 curl -s "https://civitai.com/api/v1/images?limit=20&modelVersionId=<vid>" | python3 -c "
@@ -556,13 +597,12 @@ for i in json.load(sys.stdin)['items']:
 - [ ] `parameters` のキー数・キー名が一致（実績 59）／型・null の差分ゼロ
 - [ ] `info` のキー数・キー名が一致（実績 32）／型・null の差分ゼロ
 
-`info.sd_model_hash` のみ null 固定（comfy 側で未算出、クライアント未参照で合意済み）。
-
 ### B. `parameters` の意味論
 
 - [ ] **送信値がそのまま返る**（steps / cfg_scale / sampler / scheduler を書き換えていない）
 - [ ] **送っていないキーは null のまま**（`sampler_index` だけ送って `sampler_name` が埋まらない）
-- [ ] 内部固定値は送信値のまま（denoising_strength / hr_*）
+- [ ] **HR の 2nd パス設定が効く**（`denoising_strength` / `hr_upscaler` / `hr_sampler_name` /
+      `hr_scheduler` / `hr_second_pass_steps` を変えると絵が変わり、`parameters` には送信値が返る）
 - [ ] `seed: -1` は `parameters` に `-1`、`info.seed` に実値
 - [ ] **丸めが吸収される**（`1928` を送れば `1928` が返り、実画像もその比率）
 - [ ] `info.sd_model_hash` が埋まる（forge はこのモデルをロードしないので自前で計算する）
@@ -604,11 +644,14 @@ print(d[mask].mean(), d[~mask].mean(), (d > 8).mean() * 100)
 ### F. アーキ不整合の検出
 
 - [ ] 他アーキの LoRA を指定したらエラーで落ちる
-- [ ] RAW バリアントに turbo 相当の値（`steps<=10` / `cfg<=1.5`）が来たらエラーで落ちる
+- [ ] **実在しない名前はエラーで落ちる**（checkpoint / LoRA / sampler / scheduler /
+      `hr_upscaler` / ADetailer モデル）。既定へ落として黙って別物で生成しない
+- [ ] `n_iter > 1` はエラーで落ちる（黙って枚数が減らない）
+- [ ] **値域では落ちない**（極端な steps / cfg / 想定外のサンプラーを送っても生成される）
 
-壊れた画像を納品するくらいならタスク失敗のほうがまし、という判断。クライアントは
-Civitai 画像のメタから steps/cfg をそのまま取るので、turbo 画像が RAW を申告していると
-必ずこの組み合わせが来る。
+落とす基準は**「クライアントがそれに気づけるか」**の一点。名前が解決できないまま既定へ
+落とすと、指定と違うもので生成されたことを検出する手段が無い。一方、値域は
+クライアント自身が選んだ値なので、絵が期待と違っても原因を追える。だから落とさない。
 
 ---
 
