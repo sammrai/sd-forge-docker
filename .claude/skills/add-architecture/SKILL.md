@@ -32,7 +32,9 @@ comfy_router.py
 ├── MODEL_SPECS[]              アーキごとの定義。★新アーキはここに1エントリ足す
 ├── SAMPLER_MAP / SCHEDULER_MAP  A1111 名 → comfy 名
 │
-├── _pick_spec(req)            checkpoint 名 → spec（振り分け）
+├── _pick_spec(req)            checkpoint の中身 → spec（振り分け）
+│                              判定は comfy の /router/detect_arch に聞く
+│                              （comfy/custom_nodes/arch_detect.py）
 ├── _resolve_unet(spec, name)  指定名を comfy の実ファイルへ解決
 │                              **解決できなければエラー（既定へ落とさない）**
 ├── _map_sampler_pair()        サンプラー/スケジューラ名の解決。解決不能はエラー
@@ -285,26 +287,33 @@ civitdl 管理下と同じ場所に置き、compose のマウントを増やさ�
 }
 ```
 
-### pattern の書き方
+### 振り分けは名前ではなく中身で決まる
 
-civitdl は `<モデル名>-mid_<id>-vid_<id>/<ファイル名>-mid_<id>-vid_<id>.safetensors`
-という名前を付ける。クライアントが送る `sd_model_checkpoint` はこの stem。
+`comfy_arch` には **comfy の `model_config` クラス名**を書く(`Anima` / `Krea2` /
+`ZImage` など。`supported_models.py` の `class` 名)。`_pick_spec` は comfy の
+`/router/detect_arch` に判定させ、返る `mro` にこの名前が含まれる spec を選ぶ。
+`mro` で見るのは派生クラスを親クラス名で拾うため。
 
-```
-krea2Turbo_v10-mid_2732656-vid_3072332
-zImageTurbo_turbo-mid_2168935-vid_2442439
-```
+**アーキ名がファイル名に入っている保証はない。** 手元の 278 件で照合したところ、
+アーキ名を含まないマージが 7 件あり、いずれも forge へ流れて
+"Failed to recognize model type!" で失敗していた。名前で振り分けると
+**どちらの向きでも静かに壊れる**(中身が新アーキなのに forge へ / 別アーキなのに comfy へ)。
 
-モデル名部分は作者依存で表記ゆれするが、**アーキ名は必ず含まれる**。
-だから既存の pattern はアーキ名だけを、区切り文字のゆれを吸収する形で書いてある。
+`pattern` は**判定できなかったときのフォールバック**として残す(comfy が落ちている、
+ファイルがまだ comfy から見えない)。書き方はアーキ名だけを、区切り文字のゆれを
+吸収する形にする。
 
 ```python
 r"krea\s*-?_?2"      # "Krea 2" "krea-2" "krea2" のいずれにもマッチ
 r"z[_\- ]?image"     # "z_image" "z-image" "zImage" のいずれにも
 ```
 
-**実際に civitdl で1本落として名前を確認してから書く。**
-`MODEL_SPECS` は先頭から順に照合するので、他のアーキと衝突させない。
+**判定できているのにどの spec にも当たらない場合は、名前パターンに落とさない。**
+そこで落とすと、名前だけ似た別アーキを comfy へ送ってしまう。
+
+判定は `comfy.model_detection` に任せるので、**新アーキで手を入れるのは
+`comfy_arch` の1行だけ**。導入前に手元の全チェックポイントで判定を回し、
+Civitai の申告 baseModel と食い違わないかを確認する。
 
 ### spec に新しいキーを足す場合
 
@@ -702,21 +711,33 @@ EOF
 **どちらを選ぶかはクライアント側の運用判断。** こちらは選択肢と、絞った場合に何が
 起きるか(読み替え対象外のモデルに合わない値が当たる)を提示して、決定は相手に委ねる。
 
-### `(?i:...)` のスコープ指定を忘れない
+### `match` は「同じ式」ではなく「同じマッチ集合」にする
 
-`match` は**ルーターの `MODEL_SPECS` の pattern と同じ式にする**。食い違うと、forge へ
+ルーター側の pattern と**マッチする集合が一致していること**が要件。食い違うと、forge へ
 流れるモデルに comfy の語彙を送る(またはその逆)ことになる。
 
+**渡す式に処理系固有の構文を使わない。** ルーターは Python だが、クライアントの
+`match` は**フロントエンドへ渡って JS の `RegExp` としても評価される**。Python の
+インラインフラグ `(?i:...)` は JS に無く、`Invalid group` で壊れる。
+
 ```python
-r"(?i:<arch>)(?![a-z])"   # アーキ名を接頭辞に含む別語を除外しつつ、大文字が続く名前は拾う
+r"(?i:<arch>)(?![a-z])"          # ルーター側(Python)はこれでよい
+```
+```yaml
+match: '[Aa][Nn][Ii][Mm][Aa](?![a-z])'   # 渡す側は文字クラスに展開する
 ```
 
 境界(`(?![a-z])` など)が要るのは、アーキ名が他の語の接頭辞になっているとき
-(例: `anima` は `animagine` / `animal` / `animated` の接頭辞)。
+(例: `anima` は `animagine` / `animal` / `animated` の接頭辞)。Python 側で全体を
+`re.IGNORECASE` にすると後読みにも効いて、大文字が続く名前まで落ちる。
 
-全体 `re.IGNORECASE` にすると後読みにも効いて、大文字が続く名前まで落ちる。
-**手元の全チェックポイント名 + 誤爆候補(アーキ名を接頭辞に含む別アーキのモデル)で
-照合テストしてから渡す。**
+**渡す前に両方の処理系で試す。** 手元の全チェックポイント名 + 誤爆候補で照合し、
+2つの式が**同じ集合**になることを確認する。
+
+```bash
+node -e "new RegExp('<渡す式>')"   # 構文が通るか
+python3 -c "import re; print([n for n in NAMES if bool(re.search(A,n))!=bool(re.search(B,n))])"
+```
 
 ## 責任分解（動かさない）
 
