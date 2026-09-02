@@ -71,6 +71,15 @@ subprocess.run(["docker", "compose", "up", "-d", "--no-deps", "sdui"], cwd="<rep
 掴めるのは「直前まで空だった」ことだけ。**キューに積まれた分は落ちる**ので他セッションへ
 一報を入れる。`--no-deps` は `comfy` を巻き込まないため（GPU を握ったまま両方起動する）。
 
+**両方を作り直すときは `comfy` を先に上げる。** 新しいルーターが、まだ入れ替わっていない
+`comfy` に無いノードを要求すると、その経路の生成が全部落ちる。逆順（古いルーター →
+新しい comfy）は、ノードが増える方向なので壊れない。
+
+```python
+subprocess.run(["docker", "compose", "up", "-d", "--no-deps", "comfy"], cwd=REPO)
+subprocess.run(["docker", "compose", "up", "-d", "--no-deps", "sdui"], cwd=REPO)
+```
+
 「今すぐ落とせ」と言われた場合のみ待たずに実行し、**潰したジョブを必ず報告する**
 （落とす前に `/sdapi/v1/progress` の `job` と `progress` を記録）。
 
@@ -94,16 +103,35 @@ docker inspect -f '{{.State.StartedAt}}' $(docker compose ps -q sdui)
 docker compose logs sdui 2>&1 | grep -a "comfy-router\|ADetailer initialized" | tail -2
 ```
 
-### 5. 終わったら override を消す
+**拡張の初期化ログが複数行出ていたら、二重にロードされている。**
+forge はドット始まりのディレクトリもスキャンするので、`extensions/` 配下に退避コピー
+(`.foo.bak/` など)を置くと**古い版が同時に動く**。外側(新しい方)が勝つため動作では
+気づきにくいが、モンキーパッチが二重に積まれる。**退避は `extensions/` の外へ置く。**
+
+```bash
+docker compose exec -T sdui sh -c 'find /app/data/extensions -name "<拡張の主ファイル>" -not -path "*/__pycache__/*"'
+docker compose logs sdui 2>&1 | grep -ac "<初期化ログの固有文言>"   # 1 であること
+```
+
+### 5. 終わったら override を無効化する
 
 このマシンは**開発環境と本番環境が同一**。`build:` を残すと、ローカルイメージが無い状態の
 `up -d` が CI のイメージを取りに行かず**ソースからビルドする**。しかも同じタグ名を
 上書きするので CI 産と区別が付かなくなる。
 
+**消さずに `.bak` を付けて残す。** 次にビルドが要るとき書き直す手間を省くため
+(compose は `docker-compose.override.yml` しか読まないので、リネームで無効化できる)。
+
 ```bash
-rm docker-compose.override.yml
+mv docker-compose.override.yml docker-compose.override.yml.bak
 docker compose pull sdui     # 本番へ入れるときは CI が publish したものを使う
 ```
+
+戻すときは `cp docker-compose.override.yml.bak docker-compose.override.yml`。
+
+**`pull` は変更が CI で publish されてからにする。** 未コミットのローカルビルドが
+動いている状態で pull すると、その変更が消える。順序は
+コミット → push → CI publish → `pull` → アイドルを掴んで `up -d`。
 
 ## 環境メモ
 
