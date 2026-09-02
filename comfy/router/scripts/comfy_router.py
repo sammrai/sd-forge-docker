@@ -91,6 +91,63 @@ MODEL_SPECS = [
         "hr_upscale_model": "4x-UltraSharp.pth",
         "hr_denoise": 0.33,
     },
+    {
+        "name": "anima",
+        # civitdl の stem は "homosimileAnima_v10" "waiANIMA_v10Base10"
+        # "anima_turboV11" "maleGgmixIllustrious_anima11Base" のように表記がゆれる。
+        # ただの r"anima" だと animagine(SDXL) / animal / animated まで拾ってしまうので、
+        # 直後に小文字が続く語を除く。大文字が続く形(animaGay17)は残したいので
+        # IGNORECASE はスコープ指定にして、後読みには効かせない。
+        "pattern": re.compile(r"(?i:anima)(?![a-z])"),
+        # 振り分けキーと checkpoint 名は同じフィールド(override_settings.
+        # sd_model_checkpoint)なので、spec が選ばれた時点で名前は必ず非空。
+        # つまり _resolve_unet の「名前が空なら既定」分岐には到達しない。
+        # 他アーキと構造を揃えるために置くだけなので、専用ファイルは持たず
+        # civitdl 管理下の公式 turbo を指す。
+        "unet": "Anima-mid_2458426-vid_3263843/"
+                "anima_turboV11-mid_2458426-vid_3263843.safetensors",
+        # Anima の TE は Qwen3-0.6B。CLIPLoader の type は公式テンプレートどおり
+        # "stable_diffusion"(実際の種別は state_dict から検出される)。
+        "clip": "qwen_3_06b_base.safetensors",
+        "clip_type": "stable_diffusion",
+        # Qwen-Image と同じ VAE。krea2 と同一ファイルを共有する(HF 側とサイズ一致)。
+        "vae": "qwen_image_vae.safetensors",
+        "latent_node": "EmptyLatentImage",
+        # shift=3.0 は supported_models.Anima の sampling_settings に入っており、
+        # ModelSamplingAuraFlow を挟む必要はない(公式テンプレートにも無い)。
+        "aura_shift": None,
+        # 未送信時の既定。運用するのは turbo 系なので公式の蒸留版推奨値
+        # (cfg 1 / 8-12 steps)に合わせる。非蒸留の base/aesthetic は 30-50 steps /
+        # cfg 4-5 だが、どのバリアントかはルーターが判断しない(モデルの中身を
+        # 知らない)。値はクライアントが送る。
+        #
+        # なお steps / cfg / sampler は base パスでは**到達しない**。forge の API
+        # モデルが steps=50 / cfg_scale=7.0 / sampler_index="Euler" を必ず埋めるため
+        # (稼働中の /openapi.json で確認)。到達するのは scheduler(既定 None)と、
+        # 進捗の総ステップ見積もりだけ。cfg は hr_cfg が既定 1.0 で埋まるので
+        # どこからも到達しないが、_hr2pass が参照するのでキーは残す。
+        "sampler": "euler",
+        "scheduler": "simple",
+        "steps": 8,
+        "cfg": 1.0,
+        # HR 2nd パスの既定。hr_upscaler / hr_sampler_name / denoising_strength が
+        # 未送信のときだけ使われる(いずれも API 既定は None なので到達する)。
+        # sampler と denoise はチェックポイント作者(Civitai/HomoSimile Anima)の
+        # 推奨由来: er_sde が作者の既定サンプラー、denoise は 0.35-0.4。
+        # **ただし代替との比較実測はしていない。**
+        "hr_sampler": "er_sde",
+        "hr_scheduler": "simple",
+        "hr_steps": 8,
+        # direct(1664x2432 一発, 260.7s)と esrgan_2pass(83.9s)を同一シードで比較し、
+        # 顔を等倍で見て両方とも破綻なし。同等画質で 2パスが3倍速いので 2パスに統一。
+        "hr_mode": "esrgan_2pass",
+        # 作者は R-ESRGAN 4x+ Anime6B を推奨しているが、同一 seed・同一 HR 設定で
+        # 4x-UltraSharp / RealESRGAN_x4plus_anime_6B / 4x_fatal_Anime を比較したところ
+        # 画素差 4.09・エッジエネルギー 10.53 vs 10.30 で判別できず、顔を等倍で見ても
+        # 差が無かった。替える理由が実測で出なかったので krea2 / z-image と揃える。
+        "hr_upscale_model": "4x-UltraSharp.pth",
+        "hr_denoise": 0.35,
+    },
 ]
 
 # A1111/forge のサンプラー名 -> comfy の (sampler_name, scheduler)。
@@ -258,8 +315,9 @@ def _resolve_lora(name):
         hit = cat.get(name) or cat.get(name + ".safetensors")
     if hit is None:
         raise RuntimeError(
-            f"LoRA '{name}' is not visible to comfy. "
-            f"Krea2/Z-Image 用の LoRA が models/Lora 配下にあるか確認すること")
+            f"LoRA '{name}' が comfy から見えません。"
+            f"models/Lora 配下にあるか、civitdl の取得が完了しているか"
+            f"確認してください。")
     return hit
 
 
@@ -362,7 +420,12 @@ def _sampling(req, spec):
 
 
 def _warn_unsupported(req, spec):
-    """対応していない指定をサイレントに落とさず、ログに出す。"""
+    """対応していない指定をサイレントに落とさない。
+
+    絵が変わらないもの(ControlNet など)はログに出すだけ。**別モデルの指定**は
+    エラーにする。黙って本体と同じモデルで描き直すと、指定と違うもので生成された
+    ことをクライアントが検出できないため(checkpoint / LoRA / sampler と同じ扱い)。
+    """
     ov = getattr(req, "override_settings", None) or {}
     if ov.get("sd_vae"):
         _log(f"NOTE: override_settings.sd_vae={ov['sd_vae']!r} は無視される "
@@ -370,6 +433,21 @@ def _warn_unsupported(req, spec):
     for unit in _adetailer_units(req):
         if unit.get("ad_controlnet_model") not in (None, "None", ""):
             _log("NOTE: ad_controlnet_* は Krea2/Z-Image 用 ControlNet が無いため無視")
+        # 判定条件はネイティブ forge の get_override_settings と同じにする。
+        # ad_use_checkpoint / ad_use_vae が真でも実名が入っていなければネイティブも
+        # 何もしないので、そこで落とすとクライアントの既定形が通らなくなる。
+        ck = unit.get("ad_checkpoint")
+        if (unit.get("ad_use_checkpoint") and ck
+                and ck not in ("None", "Use same checkpoint")):
+            raise RuntimeError(
+                f"ad_checkpoint={ck!r} は未対応です。comfy 側の ADetailer は本体と"
+                f"同じ checkpoint で描き直します。黙って別モデルで生成したことに"
+                f"ならないようエラーにしています。")
+        vae = unit.get("ad_vae")
+        if (unit.get("ad_use_vae") and vae
+                and vae not in ("None", "Use same VAE")):
+            raise RuntimeError(
+                f"ad_vae={vae!r} は未対応です。comfy 側は {spec['vae']} 固定です。")
 
 
 def _wait_forge_idle(timeout=600.0):
@@ -718,6 +796,11 @@ def _loaders(spec, prompt, neg, cfg, loras, unet=None):
     model_out = ["10", 0]
     for i, (name, weight) in enumerate(loras):
         nid = f"lora{i}"
+        # キーが1つも当たらない LoRA(アーキ違い)は、警告だけ出して適用せずに通る。
+        # 一度これをエラーにする custom node を入れたが、**ネイティブ forge も同じく
+        # 黙って無視して生成を続ける**(sd_forge_lora/networks.py: 未マッチが13件を
+        # 超えると元のモデルをそのまま返す)。片方の経路だけ厳しくすると I/F が
+        # 食い違うため、ネイティブに合わせて素のローダに戻した。
         g[nid] = {"class_type": "LoraLoaderModelOnly",
                   "inputs": {"model": model_out, "lora_name": _resolve_lora(name),
                              "strength_model": weight}}
@@ -1006,8 +1089,22 @@ def _expand_crop_region(crop_region, pw, ph, iw, ih):
     return max(0, x1), max(0, y1), x2, y2
 
 
+def _ad_steps(unit, base_steps):
+    """ADetailer の inpaint steps。ad_use_steps が偽なら **リクエストの steps** に落ちる。
+
+    ネイティブの ADetailer も同じで、ad_use_steps が偽なら p.steps を使う。
+    以前はここが spec["steps"] に落ちていたが、同一アーキに蒸留版(8-12 steps)と
+    非蒸留版(25-35 steps)が併存すると、base パスは送信値どおりなのに ADetailer だけ
+    要求と違う steps で回る。しかも info には「ADetailer 適用」としか出ないので
+    クライアントからは検出できない(Anima で顕在化。Krea 2 の RAW でも同じ)。
+    ad_cfg が cfg に落ちるのと揃える意味もある。
+    """
+    s = int(unit.get("ad_steps", 0) or 0) if unit.get("ad_use_steps") else 0
+    return s or base_steps
+
+
 def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offset,
-                        unet=None, pw=None, ph=None):
+                        base_steps, unet=None, pw=None, ph=None):
     """1ユニット分の ADetailer。検出→クロップ→comfy で inpaint→貼り戻し。
 
     ad_inpaint_only_masked 相当のクロップ処理を forge 側で行うので、comfy 側は
@@ -1022,8 +1119,7 @@ def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offs
 
     blur = int(unit.get("ad_mask_blur", 4) or 0)
     denoise = float(unit.get("ad_denoising_strength", 0.4) or 0.4)
-    steps = int(unit.get("ad_steps", 0) or 0) if unit.get("ad_use_steps") else 0
-    steps = steps or spec["steps"]
+    steps = _ad_steps(unit, base_steps)
     ad_cfg = float(unit.get("ad_cfg_scale", 0) or 0) if unit.get("ad_use_cfg_scale") else 0
     ad_cfg = ad_cfg or cfg
     ad_prompt = (unit.get("ad_prompt") or "").strip() or prompt
@@ -1083,7 +1179,8 @@ def _run_adetailer_unit(spec, pil, unit, prompt, neg, cfg, seed, loras, st, offs
         result.paste(region, (x0, y0))
         done += 1
 
-    _log(f"ADetailer[{unit.get('ad_model')}]: {done}/{len(masks)} region(s) inpainted")
+    _log(f"ADetailer[{unit.get('ad_model')}]: {done}/{len(masks)} region(s) inpainted "
+         f"(steps={steps} cfg={ad_cfg} denoise={denoise} {iw}x{ih})")
     return result, done
 
 
@@ -1160,7 +1257,7 @@ def _generate(req):
 
     # 進捗の総ステップ数。ADetailer は検出数が事前に分からないので 1領域/ユニットで
     # 見積もっておき、実際に増えたぶんは _submit_and_wait 側で max を押し上げる。
-    total = steps + sum(spec["steps"] for _ in units) + _hr2pass_steps(hr2pass)
+    total = steps + sum(_ad_steps(u, steps) for u in units) + _hr2pass_steps(hr2pass)
 
     _wait_forge_idle()
 
@@ -1206,10 +1303,10 @@ def _generate(req):
         new_images = []
         for im in images:
             out, done = _run_adetailer_unit(spec, im, unit, prompt, neg, cfg, seed,
-                                            loras, st, offset, unet=unet,
+                                            loras, st, offset, steps, unet=unet,
                                             pw=gw, ph=gh)
             new_images.append(out)
-            offset += spec["steps"] * max(1, done)
+            offset += _ad_steps(unit, steps) * max(1, done)
         images = new_images
         ad_used.append(unit.get("ad_model"))
         _log(f"  adetailer {unit.get('ad_model')} done {time.time() - t2:.1f}s")
@@ -1254,8 +1351,11 @@ def _generate(req):
         "negative_prompt": neg, "all_negative_prompts": [neg] * count,
         "seed": seed, "all_seeds": [seed] * count,
         "subseed": seed, "all_subseeds": [seed] * count,
-        # ネイティブは int の 0 を返す。float だと型が変わるので合わせる。
-        "subseed_strength": 0,
+        # ネイティブ(processed.js())はリクエストの値をそのまま返す。ここに
+        # リテラルを埋めると型が食い違う(int 0 を埋めていたが、実測ではネイティブ
+        # SDXL が float 0.0 を返しており、クライアントの機械照合で差分として出た)。
+        # 値そのものと同じく型もエコーバックに任せる。
+        "subseed_strength": getattr(req, "subseed_strength", 0),
         "width": req_w, "height": req_h, "sampler_name": sampler, "cfg_scale": cfg,
         "steps": steps, "batch_size": batch, "restore_faces": False,
         "face_restoration_model": None, "sd_model_name": model,
