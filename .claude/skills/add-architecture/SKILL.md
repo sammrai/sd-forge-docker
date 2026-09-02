@@ -124,6 +124,21 @@ I/F は**内部で何を経由してもよい。入出力が整合していれ�
 迷ったら **「これが起きたことをクライアントは検出できるか」** で決める。既定へ落とすと
 `parameters` には送信値が返るので検出できない。これがこのスキルの言う最悪の事態。
 
+### ただし、落とす範囲はネイティブが落ちる範囲を超えない
+
+**ネイティブが黙って通すものを、この経路だけエラーにしない。** 同じ入力が経路によって
+成功したり失敗したりすると、クライアントは経路ごとの分岐を持つことになり、互換の目標が
+崩れる。ネイティブの挙動が silent failure に見えても、**それを直すのはこの経路の仕事では
+ない**。直すなら両経路そろえる。
+
+**迷ったらネイティブの実装を読む。** 「検出できるか」で決めるのは、ネイティブが落ちる
+範囲の中だけ。境界は「名前が解決できるか」であって「効くか」ではない。
+
+| | ネイティブ | この経路 |
+|---|---|---|
+| 名前が解決できない | 失敗する | **エラー**(メッセージを読めるものにするだけ) |
+| 名前は解決できるが効かない | 無視して生成を続ける | **同じく続ける** |
+
 ### ルーターはモデルの中身を知らない
 
 **値域チェックは書かない。例外も作らない。** 蒸留の有無、蒸留時の cfg、推奨 step 数、
@@ -321,6 +336,27 @@ spec の `sampler` / `scheduler` / `steps` / `cfg` / `hr_*` は、**クライア
 送信値が必ず埋まるフィールドでは、この既定値には**到達しない**。手順4の
 「API 側の既定値を先に確認する」を必ず通すこと。
 
+### 到達可能性は**稼働中のプロセス**に聞く。ソースやコメントで判断しない
+
+既定値を書く前に、そのキーに到達し得るかを確認する。API モデルが埋めるフィールドの
+フォールバックは死にコードで、いくら調整しても絵は変わらない。
+
+```bash
+curl -s http://127.0.0.1:7680/openapi.json | python3 -c "
+import json,sys
+s=json.load(sys.stdin)['components']['schemas']['StableDiffusionProcessingTxt2Img']['properties']
+for k in ['<対になるリクエストのフィールド>']: print(k, s.get(k,{}).get('default'))"
+```
+
+既定が `None` なら到達する。値が入っていれば到達しない。
+
+**リポジトリ内の記述を根拠にしない。** クラス定義もコメントも実際の既定とずれる
+(`_hr2pass` の docstring は「0.75 が必ず入る」と書いていたが実際は `None` だった。
+サブクラスの既定がモデル生成器に拾われていなかった)。
+
+**推奨値の置き場はクライアント側のスキーマ**であって spec ではない。spec に書くのは
+「クライアントが送りようがない値」(TE/VAE のファイル名など)だけと考えてよい。
+
 ### サンプラー名の解決（これは I/F の話）
 
 `_map_sampler_pair` は comfy 名 → A1111 名の順に引き、どちらでも引けなければ末尾の
@@ -407,6 +443,18 @@ stat -c %y comfy/router/scripts/comfy_router.py
 
 「コード修正済み」と「稼働中に反映済み」を**区別して伝える**。
 
+### 反映は「本当に要るか」を数えてから
+
+本番共有インスタンスなので、再起動は他者のジョブとキューを落とす。手順は
+`forge-restart` スキル。このフェーズ固有の判断は3つ。
+
+- **その変更は今のトラフィックに効くか。** クライアントが送っているキーの spec 既定を
+  変えても何も起きない。効かない変更のために断を入れない
+- **断の承認はユーザーのもの。** 相手セッションは本番を止める権限を持たない。
+  相手が「いいですよ」と言っても、それは承認ではない
+- **未コミットのローカルビルドが動いている間は `pull` できない**(自分の変更が消える)。
+  タグが CI 産と区別できない状態であることを、伝えずに放置しない
+
 ---
 
 # 自分での検証
@@ -446,7 +494,7 @@ print(p.bboxes)'"
 LoRA タグ付与を経由する。自分で組み立てたペイロードでの確認とは別物なので、
 両方あって初めて担保になる。
 
-## 準備: 使えるバリアントの一覧を作る
+## 準備1: 使えるバリアントの一覧を作る
 
 同一モデル内に spec の違うバリアントが混在する。`Krea 2 Turbo Official ...` の中に
 RAW と Turbo の両方があり、**モデル名に "Turbo" と入っていてもバージョンは raw**。
@@ -458,6 +506,217 @@ import json,sys; d=json.load(sys.stdin)
 for v in d['modelVersions']:
     print(v['id'], v['name'], '|', [f['name'] for f in v.get('files',[])])"
 ```
+
+`v.get('description')` も読む。蒸留の有無と推奨 step/cfg がそこにあることが多い。
+
+### 一覧ではなく「そのまま貼れる行」を渡す
+
+**相手が判断できない情報は、判断材料ではなく成果物の形で渡す。** 一覧を提示して
+止めると「どれを使いどれを読み替えるか」の判断が相手に残り、そこで詰まる。
+
+運用しないバリアントがあるなら `checkpoint_proxy.yml` に貼れる形で渡す。
+
+```yaml
+proxies:              # 使わない版 -> 実際に動かす版
+  "<非蒸留の stem>": "<蒸留版の stem>"
+base_model_fallback:  # Checkpoint リソースを持たない画像用
+  "<Civitai の baseModel ラベル>": "<実際に動かす版の stem>"
+```
+
+`base_model_fallback` のキーは `/api/v1/model-versions/<vid>` の `baseModel` で
+**確認して**書く。**未定義だと該当画像が `ValueError` で落ちる**ため、渡し忘れると
+相手が実データで踏む。
+
+## 準備2: 推奨パラメータを調べる(3ソース。1つで済ませない)
+
+**クライアントが持つ既定値の根拠になる。** ルーターは値を書き換えないので、ここを
+サボると「動くが絵が破綻する」状態でクライアントに渡すことになる。
+
+| ソース | 取り方 | 何が分かるか |
+|---|---|---|
+| ① 上流のモデルカード | `curl -sL https://huggingface.co/<repo>/resolve/main/README.md` | アーキ全体の推奨。**バリアント別の step/cfg**、対応解像度、サンプラー、プロンプト規約 |
+| ② チェックポイント作者の Civitai 説明 | 手元の `extra_data-vid_*/model_dict-*.json` の `description` / `modelVersions[].description`(HTML なのでタグを剥がす) | そのチェックポイント固有の推奨。**HR 倍率の上限**やアップスケーラ名など、上流に無い情報 |
+| ③ 実際の画像の申告値 | `https://civitai.com/api/trpc/image.getGenerationData?input={"json":{"id":<image_id>}}` | 実運用の値と**宣言リソース(checkpoint / LoRA)**。v1 の `/api/v1/images` は `meta: null` を返すので使えない |
+
+**3つが食い違ったら、バリアントが併存しているサイン。** ①がバリアント別に数値を
+分けていないか、③が①のどのレンジに当たるかを見る。併存するなら、スキーマを1エントリに
+するか2エントリにするかが設計判断になる(下記)。②にしか無い情報がよくある
+(HR 倍率の上限、推奨アップスケーラ)ので①だけで済ませない。
+
+## 準備3: クライアントへ渡すスキーマを作る
+
+**「対応しました、確認してください」だけでは足りない。** クライアントはアーキごとの
+既定値と値域を YAML で持つ。**定義が無いと受け皿(`match: '.*'` の forge 用エントリ)に
+落ち、comfy が解決できない値を送ることになる**ので、検証以前に成立しない。
+
+### クライアント側で触るファイル(名指しで伝える)
+
+| ファイル | 何を足すか |
+|---|---|
+| `src/generation_defaults.yaml` | **アーキのエントリ**。`name` / `match` / `schema.properties` / `adetailer_params`。先頭から順に照合され、末尾の `match: '.*'` が受け皿 |
+| `src/scripts/checkpoint_proxy.yml` | `base_model_fallback` に **Civitai の baseModel ラベル**→ 代替チェックポイント。**未定義だと Checkpoint リソースを持たない画像が `ValueError` で落ちる**。非蒸留版を蒸留版へ寄せるなら `proxies` にも1行 |
+| `tests/backend/unit/test_generation_defaults.py` | 代表チェックポイント定数と、`COMFY_CHECKPOINTS` / `DISTILLED_CHECKPOINTS` への追加 |
+
+`match` は **civitdl のモデル名(stem)で照合する。Civitai の baseModel 名ではない。**
+`base_model_fallback` の方だけが baseModel ラベルで引く。この2つを混同しない。
+
+### スキーマの骨格(comfy 経由のアーキは全部この形)
+
+**キーを落とさない。** 送らないキーはルーターの spec 既定に落ちるので、クライアントから
+制御できなくなる。
+
+**キーを落とさない。値には根拠のコメントを付ける。** コメントが無い値は、あとから
+誰も動かせなくなる(実測なのか勘なのか判別できないため)。
+
+```yaml
+  # エントリ冒頭に、このアーキの前提をまとめて書く:
+  #   バリアントが併存するか / 1エントリにした場合の割り切り
+  #   match 式の意図(何を除外しているか、ルーター側と同じ式であること)
+  #   値域を絞った/広げた理由
+  - name: <arch>
+    match: '<ルーターの MODEL_SPECS の pattern と同じ式>'
+    schema:
+      type: object
+      properties:
+        steps:
+          type: integer
+          default:
+          minimum:
+          maximum:          # 幅を持たせると、その範囲なら元画像の申告値が残る
+        cfg_scale:
+          type: number
+          default:
+          minimum:          # 蒸留モデルは min=max=1.0 で固定
+          maximum:
+        sampler_index:
+          type: string
+          # 既定の出どころ(実画像の申告値 / 作者常用 など)
+          default:
+          enum: []
+        scheduler:
+          type: string
+          default:
+          # 解決できない名前はルーターがエラーにする(黙って既定へ落とさない)
+          enum: []
+        # --- Hires(2パス目)。1パス目の値は引き継がれないので全部要る ---
+        hr_cfg:
+          type: number
+          default:          # 蒸留モデルは 1.0 固定(理由は下記)
+          minimum:
+          maximum:
+        hr_scale:
+          type: number
+          # 上限の根拠(作者の記載 / 対応解像度 / 実測のどれか)を書く
+          default:
+          minimum:
+          maximum:
+        hr_upscaler:
+          type: string
+          # 既定を選んだ根拠。ドキュメントの表記が使えない場合はそれも書く
+          default:
+          enum: []
+        hr_sampler_name:
+          type: string
+          default:
+          enum: []
+        hr_scheduler:
+          type: string
+          # 送らないとルーター側の既定に落ちる。1パス目の scheduler は引き継がれない
+          default:
+          enum: []
+        hr_second_pass_steps:
+          type: integer
+          default:
+          minimum:
+          maximum:
+        denoising_strength:
+          type: number
+          # 下げるほどアップスケーラの出力に忠実。「下げれば安全」ではない
+          default:
+          minimum:
+          maximum:
+        adetailer:
+          type: boolean
+          default:
+          enum: []
+    adetailer_params:
+      ad_prompt: ""         # 蒸留モデルで有効にするなら空にしない(理由は下記)
+      ad_negative_prompt: ""
+```
+
+| 埋めかた | |
+|---|---|
+| `steps` / `cfg_scale` / `sampler_index` / `scheduler` | 準備2 の3ソース。バリアント別に分かれるのはここ |
+| `hr_*` / `denoising_strength` | 準備2 の② + 実測。上流のモデルカードにはまず載っていない |
+| すべての `enum` | 下記の実機検証を通したものだけ |
+
+**蒸留モデルでは `cfg_scale` と `hr_cfg` を `minimum: maximum: 1.0` で固定する。**
+cfg<=1 だとルーターは負条件を `ConditioningZeroOut` にするので CFG が成立せず、
+1.0 以外を選べる状態にしておくと壊れた絵が出るだけになる。
+
+**同じ理由で、蒸留モデルの `adetailer` を有効にするなら `ad_prompt` を必須にする。**
+空だとルーターは本体プロンプト全文を inpaint に流し(ネイティブ ADetailer と同一挙動)、
+ネガティブでの抑止が効かないため、顔がプロンプト中の別の被写体に描き換えられる。
+
+### ★ enum に書く値は、全部ルーターで解決できることを実機で確かめてから渡す
+
+**解決できない名前はルーターがエラーで落とす。** enum に嘘が1つ混ざると、その値を
+選んだ生成が丸ごと失敗する。**ドキュメントに書かれた名前をそのまま写さない** —
+上流や作者が使う表記は forge の一覧名であることがあり、comfy の語彙とは別物。
+
+```bash
+docker compose exec -T comfy curl -s http://127.0.0.1:8188/api/object_info/KSampler > /tmp/ks.json
+docker compose exec -T comfy curl -s http://127.0.0.1:8188/api/models/upscale_models > /tmp/up.json
+docker compose exec -T sdui sh -c 'ls /app/data/models/adetailer' > /tmp/ad.txt
+python3 - <<'EOF'
+import json,re
+ks=json.load(open('/tmp/ks.json'))['KSampler']['input']['required']
+samplers, scheds = set(ks['sampler_name'][0]), set(ks['scheduler'][0])
+upmodels=json.load(open('/tmp/up.json'))
+src=open('comfy/router/scripts/comfy_router.py',encoding='utf-8').read()
+SAMPLER_MAP=set(re.findall(r'^\s*"([^"]+)": \("', src, re.M))
+PIXEL=set(re.findall(r'"([a-z\- \(\)\.]+)": "(?:lanczos|nearest-exact|bilinear|bicubic|area)"', src))
+def chk_up(v):
+    k=v.strip().lower()
+    if k in PIXEL: return 'pixel'
+    return next((c for c in upmodels if c.lower()==k or c.rsplit('.',1)[0].lower()==k), None)
+for v in ['<enum に書く候補を全部>']:
+    print(v, chk_up(v) or (v.lower() in samplers) or (v.lower() in SAMPLER_MAP) or '*** 解決不可 ***')
+EOF
+```
+
+`hr_upscaler` の画素拡大側(`Lanczos` / `Bicubic` / …)は `_resolve_upscaler` が
+小文字化して引くので大小は問わない。
+
+### 1エントリか2エントリか
+
+蒸留版と非蒸留版が併存するなら、**両方の値域を1つのスキーマで表現することはできない**。
+
+- **2エントリ**(絞り込みの強い方を先に置く): 名前で判別できる場合。
+  `'(?=.*(?i:<arch>)<境界>)(?=.*(?i:<バリアント名>))'` → `'(?i:<arch>)<境界>'` の順。
+  先読みを2つ並べると語順に依存しない
+- **1エントリ**: 運用するバリアントを絞る場合。非蒸留を `checkpoint_proxy` の
+  `proxies` で蒸留版へ読み替え、読み替え対象外のコミュニティ merge には蒸留用の値が
+  当たる、という割り切りを**明示的に文書化する**(Krea 2 RAW と同じ扱い)
+
+**どちらを選ぶかはクライアント側の運用判断。** こちらは選択肢と、絞った場合に何が
+起きるか(読み替え対象外のモデルに合わない値が当たる)を提示して、決定は相手に委ねる。
+
+### `(?i:...)` のスコープ指定を忘れない
+
+`match` は**ルーターの `MODEL_SPECS` の pattern と同じ式にする**。食い違うと、forge へ
+流れるモデルに comfy の語彙を送る(またはその逆)ことになる。
+
+```python
+r"(?i:<arch>)(?![a-z])"   # アーキ名を接頭辞に含む別語を除外しつつ、大文字が続く名前は拾う
+```
+
+境界(`(?![a-z])` など)が要るのは、アーキ名が他の語の接頭辞になっているとき
+(例: `anima` は `animagine` / `animal` / `animated` の接頭辞)。
+
+全体 `re.IGNORECASE` にすると後読みにも効いて、大文字が続く名前まで落ちる。
+**手元の全チェックポイント名 + 誤爆候補(アーキ名を接頭辞に含む別アーキのモデル)で
+照合テストしてから渡す。**
 
 ## 責任分解（動かさない）
 
@@ -477,6 +736,18 @@ for v in d['modelVersions']:
 一度この線引きを誤り、「クライアントは何も改修しない」と解釈して steps/cfg/sampler を
 ルーターで書き換えた。EXIF に送っていない値が残る問題を指摘され全廃した。
 **「互換」と言われたら I/F のことで、値のことではない。**
+
+### 禁止は具体的な行為に限定して書く
+
+「無改修で」のような広い言い方をすると、相手は**必須作業まで禁じられたと読んで止まる**。
+
+| クライアントがやること | 可否 |
+|---|---|
+| アーキ定義とモデル読み替えの追加 | **必須**。こちらがスキーマを渡すので入れてもらう |
+| 不整合を見つけて起票する | お願いしたいこと |
+| I/F の不一致を埋める回避策(キーの補正、型変換、値の握り潰し) | **やらないでほしい** |
+
+**禁じるのは3行目だけ。** 相手の作業を止める言い方をしない。
 
 ## 検証の厳密さ
 
@@ -514,6 +785,25 @@ for v in d['modelVersions']:
 
 同型の規律として「**コード修正済み**」と「**稼働中に反映済み**」も必ず区別する。
 
+### 値ごとに「実測 / ドキュメント由来 / 未検証」を明記する
+
+実測した値と、読んだだけの値を同じ口調で並べない。相手は両方とも検証済みと受け取る。
+**ドキュメントの推奨は「調べた」であって「測った」ではない。**
+
+**あるバリアントでの実測を別のバリアントに外挿しない。** 蒸留版と非蒸留版では
+負条件の扱い(cfg<=1 では `ConditioningZeroOut`)が変わるため、ネガティブ側に依存する
+機能(ADetailer の抑止など)の結論はそのまま移らない。
+
+### 断定する前に、その関数を通しで読む
+
+`grep -n` のヒット行だけで制御フローを再構成しない。**ヒット行番号が飛んでいたら
+未読区間がある。** 早期 return やガード節はそこに隠れる。
+
+### 誤りが分かったら、単独で即撤回する
+
+誤った情報は相手の作業計画を変える。**放置は相手の時間を止める。** 次の定期報告に
+混ぜず、撤回だけのメッセージを送る。
+
 ## 連絡
 
 クライアント側のセッションへ `SendMessage` で連絡する。**セッション名はユーザーに確認する**
@@ -527,15 +817,27 @@ for v in d['modelVersions']:
 どういう要請だったのかを問われ、妥協なく確認できるまで終わらせないと差し戻された。
 **相手が選べば人間の頭越しに検証が止まる構図を作らない。**
 
+**準備1〜3を終えてから声をかける。** スキーマを別便にすると、相手は先に自前で定義を
+書き、あとから突き合わせる二度手間になる。
+
 依頼時に伝える内容:
 
 ```
-<arch> をルーター経由で使えるようにしました。クライアント無改修での確認をお願いします。
+<arch> をルーター経由で使えるようにしました。互換性の確認をお願いします。
+
+## 先にやっていただく必要があること（検証の前提）
+下に付けたパラメータスキーマを generation_defaults.yaml と checkpoint_proxy.yml へ
+入れてください。**これが無いと受け皿(match: '.*')の forge 用エントリに落ちて、
+comfy が解決できない値を送ることになり、検証以前に成立しません。**
+enum と既定値はこちらで実機検証済みなので、そのまま使えます。
 
 ## そちらの役割
-インタフェースの一致を追求していただくだけで結構です。**不整合を見つけたら
-返信してください。修正はこちらでやります。** クライアント側のコードは変更しないでください
-（回避策を入れると、何が非互換なのか分からなくなります）。
+上の定義を入れたうえで、インタフェースの一致をブラックボックス的に見ていただきたいです。
+**不整合を見つけたら返信してください。修正はこちらでやります。**
+
+やらないでほしいのは**I/F の不一致を埋める回避策**だけです（キーの補正、型の変換、
+値の握り潰し）。何が非互換なのか分からなくなるためです。アーキ定義の追加は
+「改修」ではなく必須作業なので、遠慮なく入れてください。
 
 ## 振り分け
 override_settings.sd_model_checkpoint が <pattern> にマッチしたら comfy へ。
@@ -544,8 +846,8 @@ SDXL 等は従来経路のままです。
 
 ## 確認をお願いしたいこと
 1. ネイティブ SDXL とのキー単位の機械照合(parameters / info のキー数・型・null)
-2. **I/F 側は無改修のまま**、実際のプロンプト・LoRA・ADetailer 設定で生成
-   （生成パラメータの推奨値はそちらで定義してください。ルーターは書き換えません）
+2. **回避策を入れない状態で**、実際のプロンプト・LoRA・ADetailer 設定で生成
+   （生成パラメータの値はそちらのスキーマが持ちます。ルーターは書き換えません）
 3. **下記の Civitai 画像を、通常の画像サンプリング経路(img2param)で流してください**
    <arch>: <Civitai 画像 URL>（LoRA 付きのものを選ぶ）
    HR あり / なしの両方でお願いします
@@ -572,7 +874,26 @@ HR は base の単純拡大との差、という形で局在性まで見てい�
 - group_hash の予測基底は実際の保存 meta と同じ構造(59キー)にしてください
 
 ## 使えるバリアント
-<上で作った一覧。RAW など spec の違うものが混在する場合は必ず明示する>
+<準備1で作った一覧。RAW / 蒸留版など spec の違うものが混在する場合は必ず明示する。
+ 名前と中身が食い違うものがあれば必ず添える
+ (モデル名に別アーキ名が入っている、同じ mid でも版によってアーキが違う、など)>
+
+## パラメータスキーマ
+<準備3で作った YAML をそのまま貼る。あわせて触るファイルを名指しする>
+- src/generation_defaults.yaml            … アーキのエントリ
+- src/scripts/checkpoint_proxy.yml        … base_model_fallback に baseModel ラベルを追加
+                                             (未定義だと Checkpoint リソース無しの画像が
+                                              ValueError で落ちます)
+- tests/backend/unit/test_generation_defaults.py … 代表チェックポイント定数
+
+enum と既定値は**すべて稼働中のルーター / comfy に問い合わせて解決可能を確認済み**です。
+値ごとの根拠（実測 / ドキュメント由来 / 未検証）も併記してあります。
+
+## 再起動について
+sd-queue のキューは永続化されていません。再起動するとキューと完了済みタスクの結果が
+消え、/sdapi/queue/{id}/status が 404 になります。**再起動が必要になったら事前に
+連絡します。** そちらから「落としていい」という判断は不要です(本番への断はユーザーの
+裁量なので、こちらからユーザーに上げます)。
 ```
 
 ## 渡す Civitai 画像の選び方
@@ -581,21 +902,45 @@ HR は base の単純拡大との差、という形で局在性まで見てい�
 リソース（checkpoint / LoRA）をクライアントがそのまま civitdl するので、**実データでしか
 出ない問題**（想定外のバリアント名、アーキ違いの LoRA、極端な生成パラメータ）を拾える。
 
+**渡す前に、その画像が本当に条件を満たすか API で確認する。** `/api/v1/images` は
+`meta: null` を返すので使えない。`trpc` の `image.getGenerationData` で
+**resources(checkpoint / LORA)と meta の両方**を見る。
+
 ```bash
-curl -s "https://civitai.com/api/v1/images?limit=20&modelVersionId=<vid>" | python3 -c "
+curl -s -H "Authorization: Bearer $CIVITAI_TOKEN" \
+  "https://civitai.com/api/trpc/image.getGenerationData?input=%7B%22json%22%3A%7B%22id%22%3A<image_id>%7D%7D" \
+  | python3 -c "
 import json,sys
-for i in json.load(sys.stdin)['items']:
-    m = i.get('meta') or {}
-    print(i['id'], m.get('sampler'), m.get('steps'), m.get('cfgScale'), m.get('Size'))"
+r=json.load(sys.stdin)['result']['data']['json']
+res=r.get('resources') or []
+print('LORA:', [(x['modelName'], x['versionId'], x.get('strength')) for x in res if x['modelType']=='LORA'])
+print('CKPT:', [(x['modelName'], x['versionName'], x['versionId']) for x in res if x['modelType']=='Checkpoint'])
+m=r.get('meta') or {}
+print('meta:', {k:v for k,v in m.items() if k in ('steps','cfgScale','sampler','Size','seed')} or '空')"
 ```
+
+**相手に渡す入力は、相手の入口を通ることを自分で確認してから渡す。** 満たすべき条件を
+先に列挙し、機械的に確認する。**resources と meta の両方が揃っていること**が最低条件
+(`meta` が空の画像はクライアントの入口で例外になる)。
 
 ## E2E チェックリスト
 
 ### A. 構造の一致（ネイティブ SDXL と機械照合）
 
-- [ ] トップレベルが `["info", "parameters"]`
-- [ ] `parameters` のキー数・キー名が一致（実績 59）／型・null の差分ゼロ
-- [ ] `info` のキー数・キー名が一致（実績 32）／型・null の差分ゼロ
+- [ ] トップレベルが `["info", "parameters"]`（実績 7キー）
+- [ ] `parameters` のキー数・キー名が一致（実績 59）／**型**・null の差分ゼロ
+- [ ] `info` のキー数・キー名が一致（実績 32）／**型**・null の差分ゼロ
+
+**キー名だけでなく型を突き合わせる。** `info` に**リテラルを埋めたキーは型が食い違う**
+(ネイティブはリクエストの値をそのまま返すため)。`info` を組み立てるときは
+**値と同じく型もエコーバックに任せる**(`getattr(req, "<key>", <既定>)`)。
+
+group_hash から pop されるキーなら実害は無いが、pop されないキーで同じことが起きると
+**同一条件の画像がハッシュ違いで別グループに割れる**。1件見つかったら、同じ作りの
+キーが他に無いか全部見る。
+
+`parameters` 側は `model_dump()` なので自分で型を作らない(ネイティブの
+`vars(txt2imgreq)` と等価であることは確認済み)。
 
 ### B. `parameters` の意味論
 
@@ -643,11 +988,18 @@ print(d[mask].mean(), d[~mask].mean(), (d > 8).mean() * 100)
 
 ### F. アーキ不整合の検出
 
-- [ ] 他アーキの LoRA を指定したらエラーで落ちる
+**契約項目を「そう作ったつもり」で埋めず、実際にその挙動になることを1件ずつ確認する。**
+落とす範囲は設計判断(1)の表に従う(**ネイティブが落ちる範囲を超えない**)。
+
+- [ ] 他アーキの LoRA は**ネイティブと同じく**扱われる(片方だけエラーにしない)
 - [ ] **実在しない名前はエラーで落ちる**（checkpoint / LoRA / sampler / scheduler /
       `hr_upscaler` / ADetailer モデル）。既定へ落として黙って別物で生成しない
 - [ ] `n_iter > 1` はエラーで落ちる（黙って枚数が減らない）
 - [ ] **値域では落ちない**（極端な steps / cfg / 想定外のサンプラーを送っても生成される）
+
+**相手に依頼するコストは、自分の実装のどこでエラーが返るかを確認してから見積もる。**
+名前の解決は `_generate` の中なので、エラーは投入時ではなく**実行時**に返る。
+異常系も本番ジョブの後ろでキュー待ちする。「安価だから」と言って依頼しない。
 
 落とす基準は**「クライアントがそれに気づけるか」**の一点。名前が解決できないまま既定へ
 落とすと、指定と違うもので生成されたことを検出する手段が無い。一方、値域は
@@ -675,5 +1027,6 @@ forge の再起動ウィンドウ。**決めつけない。**
       `docker compose logs sdui 2>&1 | grep "comfy-router] wrapped"`
 - [ ] キュー経由で base 生成が通り、顔を等倍で見て破綻がない
 - [ ] クライアントの E2E チェックリスト A〜F がすべて合格
+- [ ] クライアントへ**スキーマを渡し**、enum の全値が解決可能であることを実機検証済み
 - [ ] 変更をコミット（**コミットは都度ユーザーの承認を取る**）
 - [ ] 知見を memory に記録（アーキ固有の値、踏んだ罠、実測性能）
