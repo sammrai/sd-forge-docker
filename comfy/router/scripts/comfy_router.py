@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -42,6 +43,9 @@ ADETAILER_MODEL_DIR = os.environ.get("ADETAILER_MODEL_DIR", "/app/data/models/ad
 MODEL_SPECS = [
     {
         "name": "krea2",
+        # 振り分けの本命は comfy の判定結果(comfy_arch)。pattern は判定できなかった
+        # ときのフォールバック。詳細は _pick_spec を参照。
+        "comfy_arch": "Krea2",
         "pattern": re.compile(r"krea\s*-?_?2", re.IGNORECASE),
         "unet": "krea2_turbo_fp8_scaled.safetensors",
         "clip": "qwen3vl_4b_fp8_scaled.safetensors",
@@ -69,6 +73,7 @@ MODEL_SPECS = [
     },
     {
         "name": "z-image",
+        "comfy_arch": "ZImage",
         "pattern": re.compile(r"z[_\- ]?image", re.IGNORECASE),
         "unet": "z_image_turbo_int8_convrot.safetensors",
         "clip": "qwen_3_4b_fp8_mixed.safetensors",
@@ -93,6 +98,7 @@ MODEL_SPECS = [
     },
     {
         "name": "anima",
+        "comfy_arch": "Anima",
         # civitdl の stem は "homosimileAnima_v10" "waiANIMA_v10Base10"
         # "anima_turboV11" "maleGgmixIllustrious_anima11Base" のように表記がゆれる。
         # ただの r"anima" だと animagine(SDXL) / animal / animated まで拾ってしまうので、
@@ -201,13 +207,62 @@ def _ckpt_name(req):
         return ""
 
 
+_arch_cache = {}
+
+
+def _detect_arch(name):
+    """checkpoint の中身からアーキを判定する。判定できなければ None。
+
+    comfy の `/router/detect_arch` に聞く(custom_nodes/arch_detect.py)。判定は
+    `comfy.model_detection` が行うので、**新しいアーキが増えてもここは変えなくてよい**。
+    重みは読まず safetensors のヘッダだけを見るので、1ファイル 50ms 程度。
+    """
+    if name in _arch_cache:
+        return _arch_cache[name]
+    rel = _unet_catalog().get(name) or _unet_catalog().get(name + ".safetensors")
+    if rel is None:
+        rel = _unet_catalog(refresh=True).get(name)  # 直前に落としたものかもしれない
+    if rel is None:
+        return None
+    try:
+        url = COMFY_URL + "/router/detect_arch?name=" + urllib.parse.quote(rel)
+        info = json.loads(urllib.request.urlopen(url, timeout=30).read())
+    except Exception as e:
+        # comfy が落ちている等。ここで例外にすると SDXL の生成まで巻き添えになる。
+        _log(f"WARN: arch detection unavailable for {name!r}: {e!r}")
+        return None
+    _arch_cache[name] = info
+    return info
+
+
 def _pick_spec(req):
-    """checkpoint 名から振り分け先を決める。該当なしなら None(=forge ネイティブ)。"""
+    """checkpoint の**中身**から振り分け先を決める。該当なしなら None(=forge ネイティブ)。
+
+    以前は名前の正規表現だけで決めていたが、名前は当てにならない。実測(278件)で、
+    **名前に z-image を含まない Z-Image 系マージが7件**あり、いずれも forge へ流れて
+    "Failed to recognize model type!" で失敗していた。逆向き(名前は一致するが中身は
+    別アーキ)も起こり得る。
+
+    判定は comfy に聞く。`mro` で見るのは、派生クラス(ZImagePixelSpace など)を
+    親クラス名で拾うため。判定できなかったときだけ従来の名前パターンに落ちる
+    (comfy が落ちている / ファイルがまだ comfy から見えない場合)。
+    """
     name = _ckpt_name(req)
     if not name:
         return None
+    info = _detect_arch(name)
+    if info is not None:
+        mro = info.get("mro") or []
+        for spec in MODEL_SPECS:
+            if spec["comfy_arch"] in mro:
+                return spec
+        # 判定できているのにどの spec にも当たらない = forge が扱うアーキ。
+        # ここで名前パターンに落ちると、名前だけ似た別アーキを comfy へ送ってしまう。
+        return None
     for spec in MODEL_SPECS:
         if spec["pattern"].search(name):
+            _log(f"NOTE: {name!r} を名前パターンで {spec['name']} に振り分けました"
+                 f"(中身の判定ができませんでした)")
             return spec
     return None
 
