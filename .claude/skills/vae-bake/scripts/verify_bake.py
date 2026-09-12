@@ -22,7 +22,8 @@ def main():
     nk = {k for k in new if not k.startswith("first_stage_model.")}
     ok = {k for k in old if not k.startswith("first_stage_model.")}
     h = lambda sd, ks: hashlib.sha256(b"".join(
-        k.encode() + sd[k].contiguous().view(torch.uint8).numpy().tobytes()
+        k.encode() + repr((sd[k].shape, sd[k].dtype)).encode()
+        + sd[k].contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
         for k in sorted(ks))).hexdigest()
     print("UNet/TE キー集合が同一 :", nk == ok, "(%d keys)" % len(nk))
     print("UNet/TE バイト列が不変 :", nk == ok and h(new, nk) == h(old, ok))
