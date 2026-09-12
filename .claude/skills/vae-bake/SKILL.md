@@ -46,7 +46,7 @@ docker compose cp .claude/skills/vae-bake/scripts/vae_roundtrip.py sdui:/tmp/
 docker compose exec -T sdui python3 /tmp/vae_roundtrip.py <画像> <ckpt or vae> [...]
 ```
 
-実測例（壊れた ASTRAL [NoobAI] と、その焼き直し後）:
+実測例:
 
 | | saturation | std |
 |---|---|---|
