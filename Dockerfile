@@ -67,7 +67,7 @@ RUN pip install "ultralytics>=8.3.0,!=8.3.41,!=8.3.42,!=8.3.45,!=8.3.46" \
 RUN pip install civitdl
 
 # VAE Baking Toolのコピー
-COPY vae_bake.py /app/vae_bake.py
+COPY .claude/skills/vae-bake/scripts/vae_bake.py /app/vae_bake.py
 RUN chmod +x /app/vae_bake.py
 
 # ControlNet fix for txt2img + Tile (HiRes Fix support)

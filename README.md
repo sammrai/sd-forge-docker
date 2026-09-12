@@ -131,7 +131,11 @@ The **CivitAI** model downloader automates the downloading and placement of mode
 
 ## VAE Baking Tool
 
-Embed a VAE directly into a checkpoint model. The original model is automatically backed up to the `bak/` directory:
+Embed a VAE directly into a checkpoint model. The original model is automatically backed up to `/app/data/model-backup/`
+(outside the models tree, so forge does not list the backup as a second copy of the model).
+
+The script lives at `.claude/skills/vae-bake/scripts/vae_bake.py` and is copied into the image at build time.
+See that skill for how to tell a broken baked-in VAE from a healthy one before and after re-baking.
 
 ```bash
 docker compose exec sdui python3 /app/vae_bake.py 'MODEL_FOLDER_NAME' 'VAE_FILENAME'
@@ -144,5 +148,5 @@ docker compose exec sdui python3 /app/vae_bake.py 'AbsoluteReality-mid_81458-vid
 
 **Process:**
 * Replaces original model with VAE-baked version
-* Backs up original model to `bak/MODEL_FOLDER_NAME`
+* Backs up original model to `/app/data/model-backup/MODEL_FOLDER_NAME`
 
