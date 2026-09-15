@@ -28,15 +28,43 @@ RUN apt update && \
 RUN python3 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
-# torch は CUDA 12.8 ホイールを明示的に入れる(requirements.txt の裸の `torch` に
-# 解決させると CPU 版や別 CUDA 版が入りうる)。ホストドライバ 580 は CUDA 13 まで対応。
+# torch は cu130 ホイールを明示的に入れる(requirements.txt の裸の `torch` に
+# 解決させると CPU 版や別 CUDA 版が入りうる)。
+#
+# **cu128 だと ComfyUI の comfy_kitchen 最適化が丸ごと無効になる。**起動ログに
+#   WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.
+#   comfy_kitchen backend cuda: {'available': True, 'disabled': True}
+# が出る。MiniMax-H3 では cu130 化で 2.4倍(27.5 -> 11.3 s/it)という実測がある。
+#
+# ホストドライバは 580.159.03 で CUDA 13.0 の要求(580.65.06 以上)を満たすため、
+# cuda-compat-13-0 と LD_LIBRARY_PATH の細工は要らない(ドライバが古い環境では要る)。
+# 3つとも同じ index から入れること。混ざると libcudart.so.13 not found で落ちる。
 RUN pip install --no-cache-dir torch torchvision torchaudio \
-        --index-url https://download.pytorch.org/whl/cu128
+        --index-url https://download.pytorch.org/whl/cu130
 
 RUN git clone https://github.com/comfyanonymous/ComfyUI /app/comfy && \
     cd /app/comfy && git checkout ${COMFY_REF}
 
 RUN pip install --no-cache-dir -r /app/comfy/requirements.txt
+
+# MiniMax-H3 を 12GB に載せるための外部ノード。両方ともリビジョンを固定する。
+#
+# ComfyUI-GGUF: GGUF 量子化の UNet / text encoder ローダ。H3 の素の重みは
+#   DiT 21GB + TE 27GB で 3060 には載らない。`qwen3vl` は TXT_ARCH_LIST に入って
+#   おり、`gguf_mmproj_loader` が同じディレクトリの mmproj を自動で拾って
+#   vision タワーを繋ぐ(H3 の i2v は画像を vision ブロックとして条件付けに
+#   差し込むので、これが無いと条件付けが壊れる)。
+# ComfyUI-MiniMax-H3-Turbo: Turbo LoRA を 8 ステップで回すための専用サンプラー。
+#   H3 は映像と音声を別のフローで進めるため、通常サンプラーだと音声が壊れる。
+RUN git clone https://github.com/city96/ComfyUI-GGUF /app/comfy/custom_nodes/ComfyUI-GGUF && \
+    cd /app/comfy/custom_nodes/ComfyUI-GGUF && \
+    git checkout 6ea2651e7df66d7585f6ffee804b20e92fb38b8a && \
+    pip install --no-cache-dir -r requirements.txt
+
+RUN git clone https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo \
+        /app/comfy/custom_nodes/ComfyUI-MiniMax-H3-Turbo && \
+    cd /app/comfy/custom_nodes/ComfyUI-MiniMax-H3-Turbo && \
+    git checkout a7624b4c00626a8ae7e78860769389d706565190
 
 # モデルパス設定を焼き込む(compose のマウントを増やさない)
 COPY comfy/extra_model_paths.yaml /app/comfy/extra_model_paths.yaml
@@ -44,6 +72,31 @@ COPY comfy/extra_model_paths.yaml /app/comfy/extra_model_paths.yaml
 # VRAM だけを返す解放エンドポイント(/api/router/free_vram)。forge のジョブが
 # 挟まっても RAM 上の重みを捨てずに済ませるために使う。詳細はファイル内の説明。
 COPY comfy/custom_nodes/ /app/comfy/custom_nodes/
+
+# triton は起動時ではなく最初のカーネル JIT 時に C コンパイラを要求する。
+# cu130 化で comfy_kitchen / triton の経路が有効になった結果、runtime イメージに
+# gcc が無いと生成が
+#   RuntimeError: Failed to find C compiler. Please specify via CC environment
+#   variable or set triton.knobs.build.impl.
+# で落ちる(cu128 のときは comfy_kitchen ごと無効だったので顕在化しなかった)。
+# 依存の重いレイヤより後ろに置いてビルドキャッシュを壊さない。
+# python3-dev は triton が Python.h を include するため必須(gcc だけでは
+# fatal error: Python.h: No such file or directory で落ちる)。
+# libcuda.so.1 は CDI がホストから注入するのでイメージ側に用意する必要はない。
+RUN apt update && \
+    apt install -y --no-install-recommends gcc g++ python3-dev && \
+    apt clean && rm -rf /var/lib/apt/lists/*
+
+# triton は起動時ではなく最初のカーネル JIT 時に C コンパイラを要求する。
+# cu130 化で comfy_kitchen / triton の経路が有効になった結果、runtime イメージに
+# gcc が無いと生成が
+#   RuntimeError: Failed to find C compiler. Please specify via CC environment
+#   variable or set triton.knobs.build.impl.
+# で落ちる(cu128 のときは comfy_kitchen ごと無効だったので顕在化しなかった)。
+# 依存の重いレイヤより後ろに置いてビルドキャッシュを壊さない。
+RUN apt update && \
+    apt install -y --no-install-recommends gcc g++ && \
+    apt clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/comfy
 

@@ -1453,6 +1453,285 @@ def _generate(req):
     return b64, info, params
 
 
+# ---------------------------------------------------------------------------
+# MiniMax-H3 による画像->動画(I2VA)。txt2img とは別系統なので独立させてある。
+#
+# forge の /sdapi/v1/txt2img は「同期で画像を返す」I/F で、分単位かつ音声付きの
+# 動画は収まらない。そこで専用の同期エンドポイント /sdapi/v1/video/i2v を建て、
+# 実際の投入は sd-queue の単一ワーカー経由(/sdapi/queue/video/i2v)にする。
+# GPU の奪い合いを避けるにはキュー市民になる必要があるため、キュー外から叩く
+# 経路は用意していない(叩けはするが _wait_forge_idle のガードで待たされる)。
+#
+# 重みは 3060(12GB)に載せるため GGUF 量子化を使う。素の int8 は DiT 21GB +
+# TE 27GB で載らない。TE は Qwen3-VL を 50層で切ったもので、H3 は入力画像を
+# vision ブロックとして条件付けに差し込むため mmproj(視覚タワー)が要る。
+# ComfyUI-GGUF は text encoder と同じディレクトリから、量子化サフィックスを
+# 除いた名前を部分文字列として含む mmproj を自動で拾う。名前がずれると
+# 「見つからない」とログに出るだけで生成は続き、条件付けだけが壊れる。
+H3_SPEC = {
+    # Turbo を焼き込み済みの融合モデル(turbo8)。LoRA ノードが要らないので
+    # 「Turbo LoRA を量子化重みへ当てられるか」という不確実性ごと消える。
+    # int8_convrot は cu130 の comfy_kitchen が持つ dequantize_int8_convrot_weight
+    # カーネルが直接効く形式。NVMe 配置なので 21GB でも読み込みは十数秒で済む。
+    #
+    # 名前の `h3/` は、NVMe 上のディレクトリを通常のモデルツリーの h3/ 配下へ
+    # マウントしているため(docker-compose.override.yml)。ComfyUI はモデル
+    # ディレクトリを再帰的に走査するので extra_model_paths.yaml は変更不要。
+    "unet": "h3/minimax_h3_fused_refdelta_r1024_turbo8_mystic07_int8_convrot.safetensors",
+    # TE だけ GGUF ではなく safetensors を使う。ComfyUI-GGUF の
+    # `gguf_clip_loader` は mmproj の併合を `arch == "qwen2vl"` のときしか
+    # 行わず、この TE は `qwen3vl` を申告するため vision タワーが載らない。
+    # 結果 `visual.deepstack_merger_list.0.norm.weight` が生えず、comfy の
+    # detect_te_model が H3 用(QWEN3VL_32B)と判定できずに別の TE へ落ちる。
+    # (実測: CLIPLoaderGGUF が Mistral3 のトークナイザを掴んで TypeError)
+    "clip": "h3/qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+    "clip_type": "minimax",
+    # int8 版の映像 VAE。fp16(5.2GB)より小さくデコードも速い。
+    "video_vae": "h3/minimax_h3_video_vae_int8_convrot.safetensors",
+    "audio_vae": "h3/minimax_h3_audio_vae_fp32.safetensors",
+    # 送られてこなかったときにだけ使う既定値。テンプレート準拠。
+    # 融合モデルは 8 ステップ前提(turbo8)。サンプラー/スケジューラは
+    # Turbo 系の実測に合わせる(auction BENCHMARK: res_multistep/simple は崩れ、
+    # euler/beta は問題なし)。いずれも送られてこなかったときの既定値。
+    "sampler": "euler",
+    "scheduler": "beta",
+    "steps": 8,
+}
+H3_FPS = 24
+H3_MEGAPIXELS = 0.4
+H3_ALIGN = 32          # H3 は寸法が32の倍数(_align の既定16では足りない)
+H3_FRAME_GRID = 17     # 尺は 17k+5 フレームにスナップする
+
+
+def _h3_resolution(width, height, megapixels):
+    """アスペクト比を保ったまま総画素数に収め、32の倍数へ丸める。"""
+    scale = (megapixels * 1_000_000 / float(width * height)) ** 0.5
+    return (_align(int(round(width * scale)), H3_ALIGN),
+            _align(int(round(height * scale)), H3_ALIGN))
+
+
+def _h3_length(duration_sec):
+    """尺(秒)を H3 が要求する 17k+5 フレームグリッドにスナップする。"""
+    frames = max(5, int(round(duration_sec * H3_FPS)))
+    return frames + (5 - frames % H3_FRAME_GRID) % H3_FRAME_GRID
+
+
+def _build_h3_i2v(image_name, prompt, w, h, length, steps, seed, sampler, scheduler):
+    """公式テンプレート video_minimax_h3_i2v.json と同じ構成。
+    ローダだけ GGUF 版に差し替えてある。H3 は蒸留済みで CFG を持たないため
+    BasicGuider(negative 無し)を使う。"""
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "2": {"class_type": "UNETLoader",
+              "inputs": {"unet_name": H3_SPEC["unet"], "weight_dtype": "default"}},
+        "3": {"class_type": "CLIPLoader",
+              "inputs": {"clip_name": H3_SPEC["clip"], "type": H3_SPEC["clip_type"],
+                         "device": "default"}},
+        "4": {"class_type": "VAELoader", "inputs": {"vae_name": H3_SPEC["video_vae"]}},
+        "5": {"class_type": "VAELoader", "inputs": {"vae_name": H3_SPEC["audio_vae"]}},
+        "6": {"class_type": "MiniMaxH3ImageToVideo",
+              "inputs": {"clip": ["3", 0], "vae": ["4", 0], "prompt": prompt,
+                         "width": w, "height": h, "length": length,
+                         "first_frame": ["1", 0]}},
+        "7": {"class_type": "BasicGuider",
+              "inputs": {"model": ["2", 0], "conditioning": ["6", 0]}},
+        "8": {"class_type": "BasicScheduler",
+              "inputs": {"model": ["2", 0], "scheduler": scheduler,
+                         "steps": steps, "denoise": 1.0}},
+        "9": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler}},
+        "10": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "11": {"class_type": "SamplerCustomAdvanced",
+               "inputs": {"noise": ["10", 0], "guider": ["7", 0], "sampler": ["9", 0],
+                          "sigmas": ["8", 0], "latent_image": ["6", 1]}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
+        "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["5", 0]}},
+        "14": {"class_type": "CreateVideo",
+               "inputs": {"images": ["12", 0], "fps": float(H3_FPS), "audio": ["13", 0]}},
+        "15": {"class_type": "SaveVideo",
+               "inputs": {"video": ["14", 0], "filename_prefix": "router_h3/h3",
+                          "format": "auto", "codec": "auto"}},
+    }
+
+
+def _open_video(hist_entry):
+    """SaveVideo が書いたファイルを共有ボリュームから読む。
+
+    SaveVideo の history 上のキーは comfy のバージョンで揺れる(images/videos/gifs)
+    ので、動画拡張子を持つものを拾う。
+    """
+    exts = (".mp4", ".webm", ".mkv", ".mov")
+    for node_out in (hist_entry.get("outputs") or {}).values():
+        for key in ("images", "videos", "gifs"):
+            for item in node_out.get(key, []) or []:
+                fn = item.get("filename") or ""
+                if not fn.lower().endswith(exts):
+                    continue
+                path = os.path.join(COMFY_OUTPUT_DIR, item.get("subfolder") or "", fn)
+                with open(path, "rb") as f:
+                    return fn, f.read()
+    raise RuntimeError("comfy produced no readable video")
+
+
+def _generate_video(req):
+    """I2V を1本生成して (filename, bytes, info, params) を返す。"""
+    from PIL import Image
+    import io
+
+    params = _video_params(req)
+
+    if not (req.image or "").strip():
+        raise ValueError("image (base64) is required")
+    raw = req.image.split(",", 1)[-1]      # data URI 形式も受ける
+    pil = Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB")
+
+    mp = req.megapixels if req.megapixels else H3_MEGAPIXELS
+    if req.width and req.height:
+        w, h = _align(int(req.width), H3_ALIGN), _align(int(req.height), H3_ALIGN)
+    else:
+        w, h = _h3_resolution(pil.width, pil.height, mp)
+    length = _h3_length(req.duration)
+
+    # 名前は解決できなければエラーにする(既定へ落とすと、指定と違うもので生成
+    # されたことをクライアントが検出できない)。値域は通す。
+    sampler, scheduler = _map_sampler_pair(
+        req.sampler_name, req.scheduler, H3_SPEC["sampler"], H3_SPEC["scheduler"])
+    steps = int(req.steps) if req.steps else H3_SPEC["steps"]
+    seed = int(req.seed) if req.seed is not None and int(req.seed) >= 0 \
+        else int(uuid.uuid4().int % (2 ** 31))
+
+    # 単一ワーカー経由なら素通りするが、キューを迂回して叩かれたとき用のガード。
+    # **st.begin より前**に置く。あとに置くと自分が掴んだ job を他人のものと
+    # 誤認して、タイムアウトの 600s を丸ごと空費する。
+    _wait_forge_idle()
+
+    st = shared.state
+    st.begin("comfy-h3-i2v")
+    st.sampling_steps = steps
+    st.sampling_step = 0
+    t0 = time.time()
+    try:
+        _free_forge_vram()
+
+        image_name = _put_comfy_input(pil, "h3")
+        graph = _build_h3_i2v(image_name, req.prompt, w, h, length,
+                              steps, seed, sampler, scheduler)
+        _log(f"h3-i2v | {w}x{h} {length}f({length / H3_FPS:.2f}s) "
+             f"steps={steps} {sampler}/{scheduler} seed={seed}")
+        hist = _submit_and_wait(graph, st, node_offsets={"11": 0})
+        filename, blob = _open_video(hist)
+        elapsed = time.time() - t0
+        _log(f"h3-i2v done in {elapsed:.1f}s -> {filename} ({len(blob) / 1e6:.1f}MB)")
+        info = {
+            "filename": filename, "width": w, "height": h, "length": length,
+            "fps": H3_FPS, "duration": length / H3_FPS, "steps": steps,
+            "seed": seed, "sampler_name": sampler, "scheduler": scheduler,
+            "unet": H3_SPEC["unet"], "clip": H3_SPEC["clip"],
+            "elapsed": round(elapsed, 1), "version": "forge-comfy-router",
+        }
+        return filename, blob, info, params
+    finally:
+        global _comfy_holds_vram
+        if _lazy_release_installed:
+            _comfy_holds_vram = True
+        else:
+            _free_comfy_vram()
+        try:
+            st.end()
+            st.sampling_step = 0
+        except Exception:
+            pass
+
+
+def _is_task_manager(obj):
+    return obj is not None and hasattr(obj, "add_task") and hasattr(obj, "get_status")
+
+
+def _find_task_manager(app: FastAPI):
+    """sd-queue が作った TaskManager の**インスタンス**を探す。
+
+    別インスタンスを作るとワーカーが2本になり GPU が並列に使われる(直列化の
+    前提が崩れる)ので、見つからなければキュー経路は生やさない。
+
+    forge の `modules/script_loading.load_module` は `module_from_spec` +
+    `exec_module` で読み込み **`sys.modules` に登録しない**(`loaded_scripts` に
+    入れる)。そのため sys.modules を走査しても見つからない。
+    既に登録済みの `/sdapi/queue/txt2img` の endpoint から辿るのが確実で、
+    ローダの実装が変わっても壊れない。
+    """
+    for route in app.routes:
+        if getattr(route, "path", None) != "/sdapi/queue/txt2img":
+            continue
+        g = getattr(getattr(route, "endpoint", None), "__globals__", None) or {}
+        tm = g.get("task_manager")
+        if _is_task_manager(tm):
+            return tm
+
+    try:                                  # ルートが未登録の場合のフォールバック
+        from modules import script_loading
+        for mod in (script_loading.loaded_scripts or {}).values():
+            tm = getattr(mod, "task_manager", None)
+            if _is_task_manager(tm):
+                return tm
+    except Exception as e:
+        _log(f"WARN: loaded_scripts の走査に失敗: {e!r}")
+    return None
+
+
+def _video_params(req):
+    """送信値をそのまま返す。画像本体だけは巨大なので落とす。"""
+    d = req.model_dump() if hasattr(req, "model_dump") else dict(req)
+    return {k: v for k, v in d.items() if k != "image"}
+
+
+def _add_video_routes(app: FastAPI):
+    from typing import Optional
+
+    from fastapi import HTTPException
+    from pydantic import BaseModel, Field
+
+    class VideoI2VRequest(BaseModel):
+        image: str = Field(..., description="入力画像(base64。data URI 可)")
+        prompt: str = ""
+        duration: float = 5.0
+        steps: Optional[int] = None
+        seed: int = -1
+        sampler_name: Optional[str] = None
+        scheduler: Optional[str] = None
+        width: Optional[int] = None
+        height: Optional[int] = None
+        megapixels: Optional[float] = None
+
+    @app.post("/sdapi/v1/video/i2v")
+    def video_i2v(req: VideoI2VRequest):
+        try:
+            filename, blob, info, params = _generate_video(req)
+        except _Interrupted:
+            # ネイティブ txt2img と同じく、中断は例外にせず空の結果を返す。
+            return {"video": None, "filename": None, "parameters": _video_params(req),
+                    "info": json.dumps({"interrupted": True})}
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        return {"video": base64.b64encode(blob).decode(),
+                "filename": filename,
+                "parameters": params,
+                "info": json.dumps(info)}
+
+    tm = _find_task_manager(app)
+    if tm is None:
+        _log("WARN: sd-queue の TaskManager が見つからない。"
+             "/sdapi/queue/video/i2v は生やさない(直列化できないため)")
+        return
+
+    @app.post("/sdapi/queue/video/i2v")
+    def queue_video_i2v(req: VideoI2VRequest):
+        task_id, ok = tm.add_task(video_i2v, req)
+        if not ok:
+            raise HTTPException(status_code=503, detail="Queue is full")
+        return {"status": "queued", "task_id": task_id}
+
+    _log("added /sdapi/v1/video/i2v and /sdapi/queue/video/i2v (MiniMax-H3)")
+
+
 def _wrap_txt2img(app: FastAPI):
     from modules.api import models as api_models
 
@@ -1509,6 +1788,7 @@ def _wrap_txt2img(app: FastAPI):
 
 def on_app_started(demo: gr.Blocks, app: FastAPI):
     _wrap_txt2img(app)
+    _add_video_routes(app)
     _install_lazy_release()
 
 
