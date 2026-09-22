@@ -95,6 +95,13 @@ MODEL_SPECS = [
         "hr_mode": "esrgan_2pass",
         "hr_upscale_model": "4x-UltraSharp.pth",
         "hr_denoise": 0.33,
+        # Lumina2 系の RoPE は位置IDが**トークンの絶対行番号**(ldm/lumina/model.py の
+        # pos_ids_x)。学習域を超える行は外挿になり、下端ほど鱗状のノイズになる。
+        # 白タイル壁(被写界深度なし・全面一様)の対照実験で、1664x2432 では y≈1880 から
+        # 発生し上部は無傷だった = 内容ではなく行番号が原因。内蔵 ScaleROPE で位置IDを
+        # この高さ相当まで縮め、外挿をなくす。rope_options を読むのは lumina/flux/ernie/
+        # wan/pixeldit/kandinsky5 だけなので、krea2 と anima には置かない(無害だが無効)。
+        "rope_wall_px": 1888,
     },
     {
         "name": "anima",
@@ -669,8 +676,21 @@ def _build_txt2img(spec, prompt, neg, w, h, steps, cfg, seed, batch,
                                   "width": tw, "height": th, "crop": "disabled"}}
         g["43"] = {"class_type": "VAEEncode",
                    "inputs": {"pixels": ["42", 0], "vae": ["12", 0]}}
+        # 2nd パスだけが学習域を超える。1st パスは等倍なので触らない。
+        hr_model = model_out
+        wall = spec.get("rope_wall_px")
+        if wall and max(tw, th) > wall:
+            rope = round(wall / float(max(tw, th)), 4)
+            g["46"] = {"class_type": "ScaleROPE",
+                       "inputs": {"model": model_out,
+                                  "scale_x": rope, "shift_x": 0.0,
+                                  "scale_y": rope, "shift_y": 0.0,
+                                  "scale_t": 1.0, "shift_t": 0.0}}
+            hr_model = ["46", 0]
+            # 縦横同率。Z-Image は等方スケール前提(非等方だとアスペクトが歪む)。
+            _log(f"  hr 2nd pass: ScaleROPE {rope} ({tw}x{th} -> 位置IDを {wall}px 相当へ)")
         g["44"] = {"class_type": "KSampler",
-                   "inputs": {"model": model_out, "seed": seed,
+                   "inputs": {"model": hr_model, "seed": seed,
                               "steps": hr2pass["steps"], "cfg": hr2pass["cfg"],
                               "sampler_name": hr2pass["sampler"],
                               "scheduler": hr2pass["scheduler"],
